@@ -28,14 +28,20 @@ function setupSheets() {
       'code_id', 'description', 'category', 'contract_id', 'active'
     ],
     'Accounts': [
-      'account_id', 'name', 'type', 'currency', 'purpose', 'active'
+      'account_id', 'name', 'type', 'currency', 'scope', 'purpose', 'active'
     ],
+    // Legacy sole-trader percentage columns are retained so historical rules
+    // keep working; company rules use the biz_/per_ columns.
     'BudgetRules': [
-      'rule_id', 'name',
+      'rule_id', 'name', 'model',
       'tax_withheld_pct', 'tax_to_pay_pct',
       'acc_withheld_pct', 'acc_to_pay_pct',
       'donate_pct', 'save_pct', 'invest_pct', 'spend_pct',
-      'is_default', 'notes'
+      'biz_tax_withheld_pct', 'biz_acc_withheld_pct',
+      'biz_tax_pct', 'biz_acc_pct', 'biz_reserve_pct',
+      'per_tax_pct', 'per_acc_pct',
+      'per_donate_pct', 'per_save_pct', 'per_invest_pct', 'per_spend_pct',
+      'is_default', 'notes', 'active'
     ],
     'MyDetails': [
       'key', 'value'
@@ -61,8 +67,8 @@ function setupSheets() {
       'description', 'notes', 'line_descriptions'
     ],
     'BudgetAllocations': [
-      'allocation_id', 'invoice_id', 'category', 'percentage',
-      'amount', 'status', 'transfer_date', 'notes'
+      'allocation_id', 'invoice_id', 'category', 'category_key', 'scope',
+      'percentage', 'amount', 'status', 'transfer_date', 'notes'
     ],
     'AccountSummaries': [
       'summary_id', 'account_id', 'month', 'ending_balance',
@@ -114,8 +120,101 @@ function setupSheets() {
   // Add missing columns to existing sheets
   migrateColumns(ss, schemas);
 
+  // Backfill identity columns on pre-company allocations, then make sure a
+  // company rule exists so the Allocate tab is usable straight away.
+  migrateBudgetAllocations();
+  seedCompanyBudgetRule();
+
   Logger.log('Setup complete!');
   return 'Setup complete! Created sheets: ' + Object.keys(schemas).join(', ');
+}
+
+/**
+ * Stamp category_key and scope onto BudgetAllocations rows written before the
+ * business/personal split. Idempotent: rows that already carry a category_key
+ * are left alone, and nothing is written when there is nothing to stamp.
+ *
+ * Amounts, labels and statuses are never touched — only the two new identity
+ * columns are filled, so historical figures stay exactly as they were.
+ */
+function migrateBudgetAllocations() {
+  var ss = getSpreadsheet();
+  var sheet = ss.getSheetByName('BudgetAllocations');
+  if (!sheet) return 0;
+
+  var lastRow = sheet.getLastRow();
+  var lastCol = sheet.getLastColumn();
+  if (lastRow < 2 || lastCol < 1) return 0;
+
+  var headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+  var catCol = headers.indexOf('category');
+  var keyCol = headers.indexOf('category_key');
+  var scopeCol = headers.indexOf('scope');
+  if (catCol === -1 || keyCol === -1 || scopeCol === -1) {
+    Logger.log('migrateBudgetAllocations: columns missing, run setupSheets first');
+    return 0;
+  }
+
+  var values = sheet.getRange(2, 1, lastRow - 1, lastCol).getValues();
+  var keys = [];
+  var scopes = [];
+  var stamped = 0;
+
+  values.forEach(function(row) {
+    var existing = row[keyCol];
+    if (existing !== '' && existing !== null && existing !== undefined) {
+      keys.push([existing]);
+      scopes.push([row[scopeCol]]);
+      return;
+    }
+    var key = LEGACY_LABEL_TO_KEY[String(row[catCol])] || '';
+    keys.push([key]);
+    scopes.push([key ? 'legacy' : row[scopeCol]]);
+    if (key) stamped++;
+  });
+
+  if (stamped > 0) {
+    sheet.getRange(2, keyCol + 1, keys.length, 1).setValues(keys);
+    sheet.getRange(2, scopeCol + 1, scopes.length, 1).setValues(scopes);
+  }
+
+  Logger.log('migrateBudgetAllocations: stamped ' + stamped + ' legacy row(s)');
+  return stamped;
+}
+
+/**
+ * Create a "Company Default" budget rule from the registry defaults if no
+ * company rule exists yet. The percentages are placeholders reflecting current
+ * NZ rates — review them before relying on the numbers.
+ */
+function seedCompanyBudgetRule() {
+  var rules;
+  try {
+    rules = getAll('BudgetRules');
+  } catch (e) {
+    return null;
+  }
+
+  var hasCompanyRule = rules.some(function(r) { return ruleModel(r) === MODEL_COMPANY; });
+  if (hasCompanyRule) {
+    Logger.log('seedCompanyBudgetRule: company rule already exists, skipping');
+    return null;
+  }
+
+  var data = {
+    name: 'Company Default',
+    model: MODEL_COMPANY,
+    is_default: true,
+    notes: 'Seeded defaults — review every percentage before relying on it.'
+  };
+  BUDGET_CATEGORY_DEFS.forEach(function(def) {
+    if (!def.pctField) return;
+    data[def.pctField] = def.defaultPct == null ? 0 : def.defaultPct;
+  });
+
+  var created = addBudgetRule(data);
+  Logger.log('seedCompanyBudgetRule: created ' + created.rule_id);
+  return created;
 }
 
 /**

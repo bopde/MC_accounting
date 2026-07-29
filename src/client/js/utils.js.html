@@ -19,6 +19,7 @@ var AppCache = {
   workCodes: null,
   accounts: null,
   budgetRules: null,
+  budgetCategories: null,
   contracts: null,
   myDetails: null,
 
@@ -27,10 +28,49 @@ var AppCache = {
     this.workCodes = null;
     this.accounts = null;
     this.budgetRules = null;
+    this.budgetCategories = null;
     this.contracts = null;
     this.myDetails = null;
   }
 };
+
+/**
+ * Budget category definitions, served by the registry in BudgetCategories.gs.
+ * The front end keeps no list of its own — every ordering, label and
+ * percentage field comes from here.
+ */
+function budgetCategoryDefs() {
+  var reg = AppCache.budgetCategories;
+  return (reg && reg.categories) || [];
+}
+
+function budgetCategoryDefsInGroup(group) {
+  return budgetCategoryDefs().filter(function(d) { return d.group === group; });
+}
+
+/**
+ * Action wording for an allocation, driven by how the money actually moves.
+ */
+function settleActionLabel(settle) {
+  if (settle === 'hold') return 'Mark Set Aside';
+  if (settle === 'transfer') return 'Mark Transferred';
+  return 'Mark Paid';
+}
+
+/**
+ * Sheets hands booleans back as true, 'TRUE' or 'true' depending on how the
+ * cell was written.
+ */
+function isFlagTrue(val) {
+  return val === true || val === 'TRUE' || val === 'true';
+}
+
+/**
+ * A rule with no model column predates the business/personal split.
+ */
+function ruleModelOf(rule) {
+  return String((rule && rule.model) || '') === 'company' ? 'company' : 'sole_trader';
+}
 
 /**
  * Promise wrapper around google.script.run with a timeout.
@@ -216,6 +256,7 @@ function loadReferenceData() {
     AppCache.workCodes = data.workCodes || [];
     AppCache.accounts = data.accounts || [];
     AppCache.budgetRules = data.budgetRules || [];
+    AppCache.budgetCategories = data.budgetCategories || null;
     AppCache.contracts = data.contracts || [];
     AppCache.myDetails = data.myDetails || {};
   }).catch(function(err) {
@@ -224,6 +265,7 @@ function loadReferenceData() {
     AppCache.workCodes = AppCache.workCodes || [];
     AppCache.accounts = AppCache.accounts || [];
     AppCache.budgetRules = AppCache.budgetRules || [];
+    AppCache.budgetCategories = AppCache.budgetCategories || null;
     AppCache.contracts = AppCache.contracts || [];
     AppCache.myDetails = AppCache.myDetails || {};
     throw err;

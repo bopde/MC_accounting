@@ -231,6 +231,13 @@
   td.number, th.number { text-align: right; font-variant-numeric: tabular-nums; }
   table tr.total-row { background: var(--cream); }
   table tr.total-row td { border-top: 2px solid var(--rule); }
+  /* Scope subheading inside an allocation table (Business / Personal) */
+  table tr.group-row { background: var(--cream); }
+  table tr.group-row td {
+    border-top: 1px solid var(--rule); font-size: 0.72rem;
+    text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted);
+  }
+  table tr.group-row:hover { background: var(--cream); }
 
   .data-table { width: 100%; min-width: 0; }
   .data-table--compact td, .data-table--compact th { padding: 0.35rem 0.55rem; font-size: 0.82rem; }
@@ -465,6 +472,8 @@
   }
   .preview-numbers > div { display: flex; flex-direction: column; }
   .preview-numbers strong { font-family: var(--font-display); font-size: 1.05rem; font-weight: 300; color: var(--ocean); }
+  /* Stage boundaries in the cascade: business income, Owner Pay, personal net */
+  .preview-numbers__key strong { font-weight: 500; border-bottom: 2px solid var(--sage); }
   .preview-totals {
     margin: 0.75rem 0; padding: 0.6rem 0.8rem;
     background: var(--cream); border-radius: 4px; font-size: 0.9rem;

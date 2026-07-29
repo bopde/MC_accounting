@@ -27,8 +27,18 @@ function allocateBudgetFromClient(params) {
 }
 
 /**
+ * Preview an allocation from client. Returns what allocateBudget would write.
+ * @param {string} params - "invoiceId|ruleId"
+ */
+function previewAllocationFromClient(params) {
+  var parts = String(params).split('|');
+  if (parts.length < 2) throw new Error('Invalid parameters');
+  return previewAllocation(parts[0], parts[1]);
+}
+
+/**
  * Update allocation status from client.
- * @param {string} params - "allocationId|newStatus|transferDate"
+ * @param {string} params - "allocationId|newStatus|transferDate|notes"
  */
 function updateAllocationStatusFromClient(params) {
   var parts = String(params).split('|');

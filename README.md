@@ -1,6 +1,6 @@
 # Finance Tracker
 
-A personal finance management web app built entirely on Google Apps Script with Google Sheets as the backend. Designed for consultants who work with multiple businesses, need to track hours, generate invoices, allocate budgets, and monitor accounts across currencies.
+A finance management web app built entirely on Google Apps Script with Google Sheets as the backend. Designed for consultants trading through a company who work with multiple clients and need to track hours, generate invoices, split income between business and personal budgets, and monitor accounts across currencies.
 
 **All code runs within the Google Apps Script sandbox. No external servers, no databases, no third-party APIs.**
 
@@ -16,6 +16,7 @@ A personal finance management web app built entirely on Google Apps Script with 
 - [Usage Guide](#usage-guide)
 - [Project Structure](#project-structure)
 - [Function Reference](#function-reference)
+- [Testing](#testing)
 - [Troubleshooting](#troubleshooting)
 
 ---
@@ -36,10 +37,28 @@ A personal finance management web app built entirely on Google Apps Script with 
 - Entries are marked with the invoice ID once invoiced, preventing double-billing.
 
 ### 3. Budget Allocations
-- Define percentage splits across 8 categories: **Tax Withheld, Tax To Pay, ACC Withheld, ACC To Pay, Donate, Save, Invest, Spend**.
-- "Tax Withheld" and "ACC Withheld" apply to the gross total. All other categories split the net (total minus withheld). Withheld allocations are auto-marked as "transferred."
-- Only paid invoices can be allocated. Track each allocation as pending -> transferred -> reconciled.
-- Summary dashboard with per-category totals and per-invoice drill-down.
+
+Budgeting is split into two scopes — **business** (company money that stays in the business account) and **personal** (money drawn out) — joined by a derived **Owner Pay** bridge. Allocations are calculated from billed hours only, ex-GST; expenses are treated as pass-throughs.
+
+1. **Business**
+   1. a. **GST** — taken verbatim from the invoice, not a percentage. Held for the IRD.
+   1. b. **Business Tax** — % of business income (company rate).
+   1. c. **Business ACC** — % of business income (employer levies).
+   1. d. **Reserve** — % of business income, retained as company working capital.
+1. **Owner Pay** — business income minus the three business buckets above. A derived remainder, so it balances to the cent. It is excluded from every money total, because it moves money between two of your own accounts rather than adding to it.
+1. **Personal** (all calculated from Owner Pay)
+   1. a. **Personal Tax** — % of Owner Pay.
+   1. b. **Personal ACC** — % of Owner Pay (earner levy).
+   1. c. **Donate / Save / Invest / Spend** — split what remains, must sum to 100%. The rounding residual lands on Spend so the four lines sum exactly.
+1. **Withholding** (optional, defaults to 0%) — Tax Withheld and ACC Withheld come off gross before anything else, for the rare contract that still withholds. Auto-marked paid, because the cash never arrived.
+
+Every category definition, percentage field and the cascade itself live in one registry (`src/server/BudgetCategories.gs`). The front end reads that registry rather than keeping its own copy, and the allocation preview is computed by the same server function that writes the allocations.
+
+- Only paid invoices can be allocated. Each allocation is tracked as `allocated` -> `paid`; the button wording follows how the money actually moves (Mark Paid / Mark Set Aside / Mark Transferred).
+- Summary dashboard splits Business and Personal, shows how much is still to action in each, and drills down per invoice.
+- **Pre-company (sole trader) rules and allocations still work.** Historical allocations are tagged `legacy` and render in their own section; a rule's `model` column (`company` or `sole_trader`) decides which cascade applies.
+
+The percentages are yours to set — the seeded defaults reflect current NZ rates but are placeholders, not tax advice. Note that tax is provisioned on revenue, not profit: as a company, deductible expenses genuinely reduce your taxable income, so the Business Tax bucket will over-provision.
 
 ### 4. Account Summaries
 - Enter monthly snapshots for each account: EOM balance, realised/unrealised gains, tax paid, notes.
@@ -50,8 +69,8 @@ A personal finance management web app built entirely on Google Apps Script with 
 - **My Details**: Name, address, email, phone, tax number, GST number, bank account, payment terms. Appears on invoices.
 - **Businesses**: Client name, contact, email, address, default rate, currency. Soft-delete to preserve history.
 - **Work Codes**: Short codes (DEV, DESIGN, etc.) with descriptions and categories.
-- **Accounts**: Bank, investment, hold, crypto, or other accounts with currency and purpose.
-- **Budget Rules**: Named percentage-split templates. One can be marked as default.
+- **Accounts**: Bank, investment, hold, crypto, or other accounts with currency, scope (business or personal), and purpose.
+- **Budget Rules**: Named percentage-split templates. One can be marked as default. The form is generated from the category registry and shows the implied Owner Pay percentage as you type.
 
 All configuration is editable from the frontend. Dropdowns suggest existing entries to prevent duplication.
 
@@ -146,20 +165,23 @@ This is the **only external network request** made by the client. It loads the P
 
 ## Google Sheets Structure
 
-The spreadsheet has **10 tabs**, created automatically by `setupSheets()`:
+The spreadsheet has **11 tabs**, created automatically by `setupSheets()`:
 
 | Tab | Purpose | Key Fields |
 |-----|---------|-----------|
 | **MyDetails** | Invoice "From" details (key/value pairs) | key, value |
 | **Businesses** | Client/employer reference data | business_id, name, contact_name, email, address, default_rate, currency, active |
-| **WorkCodes** | Job classification codes | code_id, description, category, active |
-| **Accounts** | Bank/investment accounts | account_id, name, type, currency, purpose, active |
-| **BudgetRules** | Budget percentage templates | rule_id, name, is_default, tax_withheld_pct ... spend_pct, active |
-| **TimeEntries** | Logged work hours | entry_id, business_id, date, start_time, end_time, hours, work_code, rate, line_total, description, invoice_id |
+| **WorkCodes** | Job classification codes | code_id, description, category, contract_id, active |
+| **Accounts** | Bank/investment accounts | account_id, name, type, currency, scope, purpose, active |
+| **BudgetRules** | Budget percentage templates | rule_id, name, model, legacy `tax_withheld_pct`…`spend_pct`, company `biz_*_pct` / `per_*_pct`, is_default, notes, active |
+| **Contracts** | Client contracts / purchase orders | contract_id, business_id, name, po_number, date_from, date_to, value, currency, work_codes, status, notes |
+| **TimeEntries** | Logged work hours | entry_id, business_id, date, time_start, time_end, hours, description, work_code, rate, line_total, invoice_id, contract_id |
 | **Expenses** | Reimbursable expenses | expense_id, business_id, date, amount, description, work_code, invoice_id |
-| **Invoices** | Generated invoices | invoice_id, business_id, date_from, date_to, created_date, subtotal, gst, total, status, notes, include_gst, gst_rate, tax_withheld, budget_rule_id |
-| **BudgetAllocations** | Per-invoice budget splits | allocation_id, invoice_id, category, amount, status, transfer_date |
-| **AccountSummaries** | Monthly account snapshots | summary_id, account_id, month, eom_balance, realised_gains, unrealised_gains, tax_paid, notes |
+| **Invoices** | Generated invoices | invoice_id, business_id, date_from, date_to, created_date, include_gst, gst_rate, time_subtotal, subtotal, gst_amount, total, status, budget_rule_id, contract_id, po_number, description, notes, line_descriptions |
+| **BudgetAllocations** | Per-invoice budget splits | allocation_id, invoice_id, category, category_key, scope, percentage, amount, status, transfer_date, notes |
+| **AccountSummaries** | Monthly account snapshots | summary_id, account_id, month, ending_balance, realised_gains, unrealised_gains, tax_paid, total_in, total_out, notes |
+
+`category_key` and `scope` are the identity columns on an allocation; `category` is the human-readable label. Rows written before the business/personal split carry only the label, and `setupSheets()` backfills them with `legacy_*` keys — amounts and statuses are never rewritten.
 
 ### Relationships
 
@@ -175,6 +197,23 @@ Invoices   ---< BudgetAllocations (invoice_id)
 BudgetRules --< Invoices       (budget_rule_id, set when allocated)
 Accounts   ---< AccountSummaries (account_id)
 ```
+
+### Budget category registry
+
+`BudgetAllocations.category_key` is not a foreign key to a sheet — the category definitions live in code, in `src/server/BudgetCategories.gs`:
+
+```
+BUDGET_CATEGORY_DEFS  (company model)
+  business  biz_tax_withheld, biz_acc_withheld, biz_gst, biz_tax, biz_acc, biz_reserve
+  bridge    owner_pay                    (derived remainder, excluded from totals)
+  personal  per_tax, per_acc, per_donate, per_save, per_invest, per_spend
+
+LEGACY_CATEGORY_DEFS  (sole trader model, historical)
+  legacy    legacy_tax_withheld, legacy_tax, legacy_acc_withheld, legacy_acc,
+            legacy_gst, legacy_donate, legacy_save, legacy_invest, legacy_spend
+```
+
+Each definition carries its scope, its percentage field on `BudgetRules`, the base it is calculated from, and how it settles (`auto_paid`, `pay`, `hold`, `transfer`). Adding a bucket means adding one entry here plus one column via `setupSheets()` — the forms, tables, tiles and dashboard are all generated from the registry.
 
 ---
 
@@ -219,7 +258,7 @@ clasp open
 
 Then in the Apps Script editor:
 
-1. In the editor, run the `setupSheets` function (select it from the function dropdown and click Run). This creates all 10 tabs with headers. Safe to re-run.
+1. In the editor, run the `setupSheets` function (select it from the function dropdown and click Run). This creates all 11 tabs with headers, appends any missing columns, backfills identity columns on pre-company allocations, and seeds a company budget rule if none exists. Safe to re-run — it is idempotent.
 2. Go to **Deploy > New deployment**
 3. Select type: **Web app**
 4. Set "Execute as": **Me**
@@ -265,7 +304,8 @@ Simply saving the code in the editor is not enough -- the deployed web app serve
 2. **Settings > Businesses**: Add your clients/employers with their contact info, default hourly rate, and currency.
 3. **Settings > Work Codes**: Add codes for the types of work you do (e.g., DEV - Development, DESIGN - Design Work, ADMIN - Administration).
 4. **Settings > Accounts**: Add your bank, investment, savings, and other accounts you want to track.
-5. **Settings > Budget Rules**: Create at least one budget rule with percentages for all 8 categories summing to 100%. Mark one as default.
+5. **Settings > Budget Rules**: `setupSheets` seeds a "Company Default" rule. Edit it — set your business tax, ACC and reserve percentages (the form shows the resulting Owner Pay as you type), your personal tax and ACC, and a Donate/Save/Invest/Spend split summing to 100%.
+6. **Settings > Accounts**: mark each account's scope as business or personal.
 
 ### Daily Workflow: Logging Hours
 
@@ -290,12 +330,13 @@ For expenses: switch to the **Expenses** tab, select business and work code, ent
 
 ### Budget Allocation
 
-1. Go to **Budget > Allocate**
+1. Go to **Budget > Allocate Invoice**
 2. Select a paid invoice and a budget rule
-3. Review the allocation preview (gross vs. net breakdown)
-4. Adjust "Tax Already Withheld" if needed
-5. Click **Allocate** to create the 8 category allocations
-6. In **Budget > Summary**, mark allocations as "Transferred" when you move the money, and "Reconciled" when confirmed
+3. Click **Preview allocation**. The cascade reads Gross → Business income → business buckets → **Owner Pay** → personal buckets, and the total ties back to the invoice total including GST.
+4. Click **Confirm allocation** to write the rows. Buckets that come to zero are skipped.
+5. In **Budget > Money Flow**, action each allocation as you move the money — **Mark Paid** for obligations, **Mark Set Aside** for Reserve/Save/Invest, **Mark Transferred** for Owner Pay and Spend. **Undo** reverts.
+
+The Business and Personal sections show how much is still to action in each scope, so the business figure is what should still be sitting in the business bank account.
 
 ### Account Monitoring
 
@@ -314,16 +355,22 @@ MC/
 ├── .gitignore
 ├── .clasp.json.example      # Template -- copy to .clasp.json and add your script ID
 ├── README.md
+├── tools/
+│   ├── check-budget-math.js        # Dependency-free node checks for the cascade
+│   └── check-budget-integration.js # allocate -> summarise, stubbed Sheets layer
 └── src/
     ├── appsscript.json       # Apps Script manifest (runtime config, webapp settings)
     ├── server/
     │   ├── Main.gs           # doGet() entry point, include() helper
-    │   ├── Setup.gs          # Sheet creation (container-bound)
+    │   ├── Setup.gs          # Sheet creation, column + allocation migrations
     │   ├── IdService.gs      # Sequential ID generation with LockService
     │   ├── SheetService.gs   # Generic CRUD: getAll, appendRow, updateRow, findById
     │   ├── HoursService.gs   # Time entry and expense logic
     │   ├── InvoiceService.gs # Invoice generation, GST, status tracking
-    │   ├── BudgetService.gs  # 8-category budget allocation engine
+    │   ├── BudgetCategories.gs # Category registry + the pure cascade maths
+    │   ├── BudgetService.gs  # Allocation, preview and summary over the registry
+    │   ├── DashboardService.gs # Single-RPC dashboard bundle
+    │   ├── ContractService.gs  # Contracts / purchase orders
     │   ├── AccountService.gs # Monthly account summaries, 15-month overview
     │   ├── SettingsService.gs# Reference data CRUD, MyDetails management
     │   └── ClientWrappers.gs # Adapters for google.script.run single-arg limitation
@@ -382,9 +429,10 @@ Every server function the client can call, grouped by module. These are invoked 
 
 | Client calls | Server function | File | Purpose |
 |-------------|----------------|------|---------|
-| `serverCall('getBudgetSummary')` | `getBudgetSummary()` | BudgetService.gs | Aggregated budget by category |
-| `serverCall('allocateBudgetFromClient', params)` | `allocateBudgetFromClient(params)` | ClientWrappers.gs -> `allocateBudget()` | Create 8 allocations for an invoice |
-| `serverCall('updateAllocationStatusFromClient', params)` | `updateAllocationStatusFromClient(params)` | ClientWrappers.gs -> `updateAllocationStatus()` | Mark transferred/reconciled |
+| `serverCall('getBudgetSummary', range)` | `getBudgetSummary(params)` | BudgetService.gs | Allocations grouped by scope, with per-scope and Owner Pay figures |
+| `serverCall('previewAllocationFromClient', params)` | `previewAllocationFromClient(params)` | ClientWrappers.gs -> `previewAllocation()` | Compute an allocation without writing it |
+| `serverCall('allocateBudgetFromClient', params)` | `allocateBudgetFromClient(params)` | ClientWrappers.gs -> `allocateBudget()` | Write the allocations for an invoice |
+| `serverCall('updateAllocationStatusFromClient', params)` | `updateAllocationStatusFromClient(params)` | ClientWrappers.gs -> `updateAllocationStatus()` | Mark an allocation paid / set aside / transferred, or undo |
 
 #### Accounts
 
@@ -425,13 +473,20 @@ generateInvoice(params)
 ├── getSpreadsheet()  [uses SpreadsheetApp.getActiveSpreadsheet()]
 └── getColumnIndex(sheet, 'invoice_id')
 
-allocateBudget(invoiceId, ruleId, taxWithheld)
+allocateBudget(invoiceId, ruleId)
 ├── findById('Invoices', invoiceId)
 │   └── getAll('Invoices')
-├── findById('BudgetRules', ruleId)  [or getAll if ruleId is 'default']
-├── appendRow('BudgetAllocations', ...) x8
-│   └── generateId('BudgetAllocations') x8  [each uses LockService]
+├── findById('BudgetRules', ruleId)
+├── buildAllocationPlan(invoice, rule)
+│   ├── invoiceAllocationBasis(invoice)          [billed hours, ex-GST]
+│   └── computeCompanyAllocation(...)            [or computeLegacyAllocation for a
+│       └── validateCompanyRule inputs applied    pre-company rule]
+├── appendRow('BudgetAllocations', ...) per non-zero line
+│   └── generateId('BudgetAllocations')  [each uses LockService]
 └── updateRow('Invoices', ...)
+
+previewAllocation(invoiceId, ruleId)
+└── buildAllocationPlan(invoice, rule)   [same code path, nothing written]
 
 getInvoiceDetails(invoiceId)
 ├── findById('Invoices', invoiceId)
@@ -451,8 +506,12 @@ getYearOverview(year)
 └── getActive('Accounts')
 
 setupSheets()
-└── getSpreadsheet()
-    └── SpreadsheetApp.getActiveSpreadsheet()
+├── getSpreadsheet()
+│   └── SpreadsheetApp.getActiveSpreadsheet()
+├── migrateColumns(ss, schemas)           [append-only, never renames]
+├── migrateBudgetAllocations()            [stamps legacy_* keys, idempotent]
+└── seedCompanyBudgetRule()               [only if no company rule exists]
+    └── addBudgetRule(...) -> validateCompanyRule(...)
 ```
 
 ### ClientWrappers.gs Adapter Pattern
@@ -465,11 +524,27 @@ Server:  updateInvoiceStatusFromClient('INV-2026-001|paid')
            -> splits on '|'
            -> calls updateInvoiceStatus('INV-2026-001', 'paid')
 
-Client:  serverCall('allocateBudgetFromClient', 'INV-2026-001|RULE-001|500')
-Server:  allocateBudgetFromClient('INV-2026-001|RULE-001|500')
+Client:  serverCall('allocateBudgetFromClient', '0526|BR-001')
+Server:  allocateBudgetFromClient('0526|BR-001')
            -> splits on '|'
-           -> calls allocateBudget('INV-2026-001', 'RULE-001', 500)
+           -> calls allocateBudget('0526', 'BR-001')
 ```
+
+---
+
+## Testing
+
+The app itself only runs inside Apps Script, but the allocation cascade in `src/server/BudgetCategories.gs` deliberately references no Google globals, so it can be exercised locally. No dependencies, no build step:
+
+```bash
+node tools/check-budget-math.js         # the cascade arithmetic
+node tools/check-budget-integration.js  # allocate -> summarise, with a stubbed Sheets layer
+```
+
+1. `check-budget-math.js` asserts the conservation invariant (every line sums to gross + GST), that Owner Pay is an exact remainder, that the distribution residual keeps the four personal buckets exact, that each rule-validation failure throws, and that the legacy sole-trader cascade produces figures identical to before the split.
+1. `check-budget-integration.js` stands in for the Sheets layer and checks that `allocateBudget` writes exactly what the preview promised, that `getBudgetSummary` returns the scoped shape the Budget page renders, that pre-company allocations resolve by label rather than colliding with the new personal buckets, and that settling and undoing move the right figures.
+
+Run both before pushing any change to `BudgetCategories.gs` or `BudgetService.gs`. Neither replaces clicking through the deployed app — the Sheets layer, client rendering and migrations are only exercised there.
 
 ---
 

@@ -2,33 +2,28 @@
  * Budget allocation service.
  * Applies budget rules to invoices and tracks money flow.
  *
- * Three-tier allocation model (applied to invoice subtotal, excl GST):
- *   Tier 1 — Withheld (Tax/ACC Withheld): % of Gross → deducted to give Adjusted
- *   Tier 2 — Obligations (Tax/ACC To Pay): % of Adjusted → deducted to give Net
- *   Tier 3 — Distribution (Donate/Save/Invest/Spend): % of Net → must sum to 100%
+ * Two models are supported:
  *
- * GST Collected is tracked separately from the invoice's gst_amount field.
+ *   'company' (current) — a two-scope cascade. Business money (GST, Business
+ *     Tax, Business ACC, Reserve) stays in the business account; the remainder
+ *     becomes Owner Pay, which is drawn to the personal account and split
+ *     across Personal Tax, Personal ACC, Donate, Save, Invest and Spend.
+ *
+ *   'sole_trader' (legacy) — the original three-tier cascade, kept so
+ *     historical rules still work and old allocations still render.
+ *
+ * Every category definition, percentage field and the whole company cascade
+ * live in BudgetCategories.gs. Nothing in this file hardcodes a bucket.
  *
  * Status model: 'allocated' -> 'paid'
  */
 
-var BUDGET_CATEGORIES = [
-  'Tax Withheld', 'Tax To Pay', 'ACC Withheld', 'ACC To Pay',
-  'GST Collected',
-  'Donate', 'Save', 'Invest', 'Spend'
-];
-
-var BUDGET_PCT_FIELDS = [
-  'tax_withheld_pct', 'tax_to_pay_pct',
-  'acc_withheld_pct', 'acc_to_pay_pct',
-  null,
-  'donate_pct', 'save_pct', 'invest_pct', 'spend_pct'
-];
-
-var WITHHELD_CATEGORIES = ['Tax Withheld', 'ACC Withheld'];
-var OBLIGATION_CATEGORIES = ['Tax To Pay', 'ACC To Pay', 'GST Collected'];
-var DISTRIBUTION_CATEGORIES = ['Donate', 'Save', 'Invest', 'Spend'];
-
+/**
+ * Legacy three-tier cascade (applied to the invoice subtotal, excl GST):
+ *   Tier 1 — Withheld (Tax/ACC Withheld): % of Gross → deducted to give Adjusted
+ *   Tier 2 — Obligations (Tax/ACC To Pay): % of Adjusted → deducted to give Net
+ *   Tier 3 — Distribution (Donate/Save/Invest/Spend): % of Net → must sum to 100%
+ */
 function computeAllocationAmounts(rule, gross) {
   var withheld = 0;
   BUDGET_CATEGORIES.forEach(function(cat, i) {
@@ -62,7 +57,96 @@ function computeAllocationAmounts(rule, gross) {
 }
 
 /**
+ * The allocation base for an invoice: billed hours only, ex-GST.
+ * Expenses are pass-throughs and are deliberately excluded.
+ */
+function invoiceAllocationBasis(invoice) {
+  var gross = (invoice.time_subtotal != null && invoice.time_subtotal !== '')
+    ? Number(invoice.time_subtotal) : (Number(invoice.subtotal) || 0);
+  var gstAmount = isTruthy(invoice.include_gst) ? (Number(invoice.gst_amount) || 0) : 0;
+  return { gross: gross, gstAmount: gstAmount };
+}
+
+/**
+ * Shape the legacy cascade's output like the company cascade's, so preview
+ * and allocation code paths stay identical regardless of model.
+ */
+function computeLegacyAllocation(rule, gross, gstAmount) {
+  var calc = computeAllocationAmounts(rule, gross);
+
+  var lines = LEGACY_CATEGORY_DEFS.map(function(d) {
+    return {
+      key: d.key,
+      label: d.label,
+      scope: d.scope,
+      group: d.group,
+      basis: d.basis,
+      settle: d.settle,
+      isTransfer: false,
+      pct: d.pctField ? (Number(rule[d.pctField]) || 0) : null,
+      amount: d.basis === 'invoice_gst' ? gstAmount : (calc.amounts[d.label] || 0)
+    };
+  });
+
+  return {
+    lines: lines,
+    stages: {
+      gross: gross,
+      withheld: calc.withheld,
+      adjusted: calc.adjusted,
+      gst: gstAmount,
+      obligations: calc.obligations,
+      net: calc.net
+    },
+    total: round2(lines.reduce(function(s, l) { return s + l.amount; }, 0))
+  };
+}
+
+/**
+ * Build the full set of allocation lines for an invoice + rule, without
+ * writing anything. Both allocateBudget and previewAllocation go through
+ * here, so a preview can never disagree with what gets written.
+ */
+function buildAllocationPlan(invoice, rule) {
+  var basis = invoiceAllocationBasis(invoice);
+  var model = ruleModel(rule);
+
+  var plan = (model === MODEL_COMPANY)
+    ? computeCompanyAllocation(rule, basis.gross, basis.gstAmount)
+    : computeLegacyAllocation(rule, basis.gross, basis.gstAmount);
+
+  plan.model = model;
+  return plan;
+}
+
+/**
+ * Preview an allocation. Returns exactly what allocateBudget would write.
+ */
+function previewAllocation(invoiceId, ruleId) {
+  var invoice = findById('Invoices', invoiceId);
+  if (!invoice) throw new Error('Invoice not found: ' + invoiceId);
+
+  var rule = findById('BudgetRules', ruleId);
+  if (!rule) throw new Error('Budget rule not found: ' + ruleId);
+
+  var business = invoice.business_id ? findById('Businesses', invoice.business_id) : null;
+  var plan = buildAllocationPlan(invoice, rule);
+
+  return {
+    invoice_id: invoice.invoice_id,
+    business_name: business ? business.name : 'Unknown',
+    currency: (business && business.currency) || 'NZD',
+    rule: { rule_id: rule.rule_id, name: rule.name, model: plan.model },
+    model: plan.model,
+    lines: plan.lines.filter(function(l) { return l.amount !== 0; }),
+    stages: plan.stages,
+    total: plan.total
+  };
+}
+
+/**
  * Allocate budget for an invoice using a specific rule.
+ * Lines that come to zero are skipped — there is nothing to track.
  */
 function allocateBudget(invoiceId, ruleId) {
   var lock = LockService.getScriptLock();
@@ -81,42 +165,32 @@ function allocateBudget(invoiceId, ruleId) {
     var rule = findById('BudgetRules', ruleId);
     if (!rule) throw new Error('Budget rule not found: ' + ruleId);
 
-    var gross = (invoice.time_subtotal != null && invoice.time_subtotal !== '')
-      ? Number(invoice.time_subtotal) : (Number(invoice.subtotal) || 0);
-    var gstAmount = isTruthy(invoice.include_gst) ? (Number(invoice.gst_amount) || 0) : 0;
+    var plan = buildAllocationPlan(invoice, rule);
     var today = todayLocal();
-    var calc = computeAllocationAmounts(rule, gross);
 
     var allocations = [];
-    BUDGET_CATEGORIES.forEach(function(cat, i) {
-      if (cat === 'GST Collected') {
-        if (gstAmount > 0) {
-          allocations.push(appendRow('BudgetAllocations', {
-            invoice_id: invoiceId,
-            category: 'GST Collected',
-            percentage: 0,
-            amount: gstAmount,
-            status: 'allocated',
-            transfer_date: '',
-            notes: ''
-          }));
-        }
-        return;
-      }
-      var pct = Number(rule[BUDGET_PCT_FIELDS[i]]) || 0;
-      var isWithheld = WITHHELD_CATEGORIES.indexOf(cat) !== -1;
+    plan.lines.forEach(function(line) {
+      if (line.amount === 0) return;
+      var autoPaid = line.settle === 'auto_paid';
 
-      var allocation = appendRow('BudgetAllocations', {
+      allocations.push(appendRow('BudgetAllocations', {
         invoice_id: invoiceId,
-        category: cat,
-        percentage: pct,
-        amount: calc.amounts[cat],
-        status: isWithheld ? 'paid' : 'allocated',
-        transfer_date: isWithheld ? today : '',
-        notes: isWithheld ? 'Auto-paid (withheld by payer)' : ''
-      });
-      allocations.push(allocation);
+        category: line.label,
+        category_key: line.key,
+        scope: line.scope,
+        percentage: line.pct == null ? '' : line.pct,
+        amount: line.amount,
+        status: autoPaid ? 'paid' : 'allocated',
+        transfer_date: autoPaid ? today : '',
+        notes: autoPaid ? 'Auto-paid (withheld by payer)' : ''
+      }));
     });
+
+    // Otherwise the invoice would be stamped with a rule it never used, and
+    // would still show as unallocated because no rows exist.
+    if (allocations.length === 0) {
+      throw new Error('Nothing to allocate — this invoice has no billable value.');
+    }
 
     invoice.budget_rule_id = ruleId;
     updateRow('Invoices', invoice._rowIndex, invoice);
@@ -155,7 +229,11 @@ function normaliseAllocationStatus(status) {
 }
 
 /**
- * Get budget summary across all invoices.
+ * Get budget summary across all invoices, grouped by scope.
+ *
+ * Owner Pay is reported separately as `bridge` and excluded from every money
+ * total — it is a transfer between two of your own accounts, so counting it
+ * would double every personal dollar.
  */
 function getBudgetSummary(params) {
   var invoices;
@@ -182,11 +260,16 @@ function getBudgetSummary(params) {
   var invMap = {};
   invoices.forEach(function(inv) { invMap[normalizeId(inv.invoice_id)] = inv; });
 
-  var byCat = {};
-  BUDGET_CATEGORIES.forEach(function(cat) {
-    byCat[cat] = {
-      category: cat,
-      isWithheld: WITHHELD_CATEGORIES.indexOf(cat) !== -1,
+  var byKey = {};
+  allCategoryDefs().forEach(function(def) {
+    byKey[def.key] = {
+      key: def.key,
+      category: def.label,
+      scope: def.scope,
+      group: def.group,
+      settle: def.settle,
+      isTransfer: !!def.isTransfer,
+      isWithheld: def.settle === 'auto_paid',
       allocated: 0,
       paid: 0,
       outstanding: 0,
@@ -195,21 +278,22 @@ function getBudgetSummary(params) {
   });
 
   allocations.forEach(function(a) {
-    var cat = a.category;
-    if (!byCat[cat]) return;
+    var key = resolveCategoryKey(a);
+    var cat = byKey[key];
+    if (!cat) return;
 
     var amount = Number(a.amount) || 0;
     var status = normaliseAllocationStatus(a.status);
     var inv = invMap[normalizeId(a.invoice_id)] || {};
 
-    byCat[cat].allocated += amount;
+    cat.allocated += amount;
     if (status === 'paid') {
-      byCat[cat].paid += amount;
+      cat.paid += amount;
     } else {
-      byCat[cat].outstanding += amount;
+      cat.outstanding += amount;
     }
 
-    byCat[cat].items.push({
+    cat.items.push({
       allocation_id: a.allocation_id,
       invoice_id: a.invoice_id,
       business_name: bizMap[normalizeId(inv.business_id)] || 'Unknown',
@@ -220,40 +304,76 @@ function getBudgetSummary(params) {
     });
   });
 
-  var categories = BUDGET_CATEGORIES.map(function(c) { return byCat[c]; });
+  // Only buckets that actually carry allocations are worth rendering.
+  var used = allCategoryDefs().map(function(def) { return byKey[def.key]; })
+    .filter(function(c) { return c.items.length > 0; });
 
-  var totals = {
-    allocated: 0, paid: 0, outstanding: 0,
-    taxWithheld: byCat['Tax Withheld'].paid,
-    taxToPayAllocated: byCat['Tax To Pay'].allocated,
-    taxToPayPaid: byCat['Tax To Pay'].paid,
-    taxToPayOutstanding: byCat['Tax To Pay'].outstanding,
-    accWithheld: byCat['ACC Withheld'].paid,
-    accToPayAllocated: byCat['ACC To Pay'].allocated,
-    accToPayPaid: byCat['ACC To Pay'].paid,
-    accToPayOutstanding: byCat['ACC To Pay'].outstanding,
-    gstAllocated: byCat['GST Collected'].allocated,
-    gstPaid: byCat['GST Collected'].paid,
-    gstOutstanding: byCat['GST Collected'].outstanding,
-    spendAllocated: byCat['Spend'].allocated, spendPaid: byCat['Spend'].paid, spendOutstanding: byCat['Spend'].outstanding,
-    saveAllocated: byCat['Save'].allocated, savePaid: byCat['Save'].paid, saveOutstanding: byCat['Save'].outstanding,
-    donateAllocated: byCat['Donate'].allocated, donatePaid: byCat['Donate'].paid, donateOutstanding: byCat['Donate'].outstanding,
-    investAllocated: byCat['Invest'].allocated, investPaid: byCat['Invest'].paid, investOutstanding: byCat['Invest'].outstanding
-  };
-  categories.forEach(function(c) {
+  var scopes = BUDGET_SCOPES.map(function(s) {
+    var cats = used.filter(function(c) { return c.scope === s.scope; });
+    var group = {
+      scope: s.scope,
+      label: s.label,
+      accountHint: s.accountHint,
+      categories: cats,
+      allocated: 0,
+      paid: 0,
+      outstanding: 0
+    };
+    cats.forEach(function(c) {
+      group.allocated += c.allocated;
+      group.paid += c.paid;
+      group.outstanding += c.outstanding;
+    });
+    return group;
+  }).filter(function(g) { return g.categories.length > 0; });
+
+  var totals = { allocated: 0, paid: 0, outstanding: 0, allocationCount: 0 };
+  used.forEach(function(c) {
+    if (c.isTransfer) return;
+    totals.allocationCount += c.items.length;
     totals.allocated += c.allocated;
     totals.paid += c.paid;
     totals.outstanding += c.outstanding;
   });
 
-  return { categories: categories, totals: totals };
+  var bridgeCat = byKey.owner_pay;
+  var bridge = {
+    allocated: bridgeCat.allocated,
+    paid: bridgeCat.paid,
+    outstanding: bridgeCat.outstanding
+  };
+
+  // What should still be sitting in each account: everything allocated but
+  // not yet paid out, set aside or moved on.
+  var accountHoldings = { business: 0, personal: 0, legacy: 0 };
+  used.forEach(function(c) {
+    if (c.isTransfer) return;
+    if (accountHoldings[c.scope] === undefined) return;
+    accountHoldings[c.scope] += c.outstanding;
+  });
+
+  return {
+    scopes: scopes,
+    categories: used,
+    bridge: bridge,
+    accountHoldings: accountHoldings,
+    totals: totals
+  };
 }
 
 /**
- * Validate budget rule: distribution categories (Donate/Save/Invest/Spend)
- * must sum to 100% of net.
+ * Validate a budget rule against the model it declares.
  */
 function validateBudgetRule(rule) {
+  if (ruleModel(rule) === MODEL_COMPANY) return validateCompanyRule(rule);
+  return validateLegacyBudgetRule(rule);
+}
+
+/**
+ * Legacy validation: distribution categories (Donate/Save/Invest/Spend)
+ * must sum to 100% of net.
+ */
+function validateLegacyBudgetRule(rule) {
   var distSum = 0;
   BUDGET_CATEGORIES.forEach(function(cat, i) {
     if (DISTRIBUTION_CATEGORIES.indexOf(cat) !== -1) {
@@ -262,7 +382,7 @@ function validateBudgetRule(rule) {
   });
 
   if (Math.abs(distSum - 1.0) > 0.001) {
-    throw new Error('Distribution categories (Donate, Save, Invest, Spend) must sum to 100%. Current: ' + (distSum * 100).toFixed(1) + '%');
+    throw new Error('Distribution categories (' + DISTRIBUTION_CATEGORIES.join(', ') + ') must sum to 100%. Current: ' + (distSum * 100).toFixed(1) + '%');
   }
   return true;
 }

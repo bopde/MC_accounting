@@ -2,30 +2,20 @@
 /**
  * Budget Allocations module.
  *
- * Simplified two-state model:
- *   allocated -> paid
+ * Money is split across two scopes joined by the Owner Pay bridge:
+ *   Business — GST, Business Tax, Business ACC, Reserve. Stays in the
+ *              business account.
+ *   Owner Pay — the remainder, drawn from business to personal.
+ *   Personal — Personal Tax, Personal ACC, Donate, Save, Invest, Spend.
  *
- * Withheld categories (Tax Withheld, ACC Withheld) are always 'paid'
- * because the payer already withheld them at source.
+ * Category definitions, ordering and the whole cascade come from the server
+ * registry (BudgetCategories.gs) via AppCache.budgetCategories. This file
+ * keeps no list of its own and does no allocation maths — the preview is
+ * computed by the same server code that writes the allocations.
  *
- * Flow:
- *   1. Invoice marked paid (in Invoices page)
- *   2. User allocates it here using a budget rule  -> allocations land as 'allocated'
- *   3. User clicks "Mark Paid" on each allocation  -> allocation becomes 'paid'
+ * Stored status model: allocated -> paid. The button wording varies by how
+ * the money actually moves (paid out / set aside / transferred).
  */
-
-var BUDGET_CATEGORIES_UI = [
-  'Tax Withheld', 'Tax To Pay', 'ACC Withheld', 'ACC To Pay',
-  'GST Collected',
-  'Donate', 'Save', 'Invest', 'Spend'
-];
-
-var BUDGET_PCT_FIELDS = [
-  'tax_withheld_pct', 'tax_to_pay_pct',
-  'acc_withheld_pct', 'acc_to_pay_pct',
-  null,
-  'donate_pct', 'save_pct', 'invest_pct', 'spend_pct'
-];
 
 function renderBudgetPage(container) {
   container.innerHTML =
@@ -77,11 +67,12 @@ function renderBudgetSummary() {
 
   serverCall('getBudgetSummary', { dateFrom: AppState.dateFrom, dateTo: AppState.dateTo }).then(function(summary) {
     var body = document.getElementById('budget-summary-body');
-    var categories = (summary && summary.categories) || [];
+    var scopes = (summary && summary.scopes) || [];
     var totals = (summary && summary.totals) || {};
+    var holdings = (summary && summary.accountHoldings) || {};
+    var bridge = (summary && summary.bridge) || { allocated: 0, paid: 0, outstanding: 0 };
 
-    var hasData = categories.some(function(c) { return c.items && c.items.length > 0; });
-    if (!hasData) {
+    if (!scopes.length) {
       body.innerHTML =
         '<article class="empty-state">' +
           '<h3>No allocations in this date range</h3>' +
@@ -99,7 +90,7 @@ function renderBudgetSummary() {
         '<div class="flow-tile flow-tile--total">' +
           '<span class="flow-tile__label">Total allocated</span>' +
           '<span class="flow-tile__value">' + formatCurrency(totals.allocated) + '</span>' +
-          '<span class="flow-tile__detail">across ' + categories.reduce(function(s, c){ return s + c.items.length; }, 0) + ' allocations</span>' +
+          '<span class="flow-tile__detail">across ' + (totals.allocationCount || 0) + ' allocations</span>' +
         '</div>' +
         '<div class="flow-tile flow-tile--paid">' +
           '<span class="flow-tile__label">Moved / paid</span>' +
@@ -112,50 +103,59 @@ function renderBudgetSummary() {
           '<span class="flow-tile__detail">' + pctOf(totals.outstanding, totals.allocated) + ' of total</span>' +
         '</div>' +
       '</div>' +
+      '<p class="muted small" style="margin:0.35rem 0 0;">Owner Pay is excluded from these totals — ' +
+        'it moves money between your own accounts rather than adding to it.</p>' +
     '</section>';
 
-    // --- Tax, ACC & GST at a glance ---
+    // --- Business / personal split at a glance ---
     html += '<section class="flow-group">' +
-      '<h3 class="flow-group__title">Tax, ACC &amp; GST</h3>' +
+      '<h3 class="flow-group__title">Business vs personal</h3>' +
       '<div class="flow-grid">' +
-        tileWithheldPaid('Tax withheld (at source)', totals.taxWithheld) +
-        tileSplit('Tax to pay', totals.taxToPayAllocated, totals.taxToPayPaid, totals.taxToPayOutstanding) +
-        tileWithheldPaid('ACC withheld (at source)', totals.accWithheld) +
-        tileSplit('ACC to pay', totals.accToPayAllocated, totals.accToPayPaid, totals.accToPayOutstanding) +
-        tileSplit('GST collected', totals.gstAllocated, totals.gstPaid, totals.gstOutstanding) +
+        tilePlain('Business — still to action', holdings.business,
+          'GST, tax, ACC and reserve not yet actioned') +
+        tilePlain('Drawn to personal (Owner Pay)', bridge.paid,
+          formatCurrency(bridge.outstanding) + ' still to draw') +
+        tilePlain('Personal — still to action', holdings.personal,
+          'personal allocations not yet actioned') +
       '</div>' +
+      '<p class="muted small" style="margin:0.35rem 0 0;">' +
+        'Business figures are money the company owes or is holding back, so they should still be ' +
+        'sitting in the business account.' +
+        (holdings.legacy
+          ? ' A further ' + formatCurrency(holdings.legacy) + ' is outstanding against pre-company (sole trader) allocations.'
+          : '') +
+      '</p>' +
     '</section>';
 
-    // --- Net distribution at a glance ---
-    html += '<section class="flow-group">' +
-      '<h3 class="flow-group__title">Net</h3>' +
-      '<div class="flow-grid">' +
-        tileSplit('Spend', totals.spendAllocated, totals.spendPaid, totals.spendOutstanding) +
-        tileSplit('Save', totals.saveAllocated, totals.savePaid, totals.saveOutstanding) +
-        tileSplit('Donate', totals.donateAllocated, totals.donatePaid, totals.donateOutstanding) +
-        tileSplit('Invest', totals.investAllocated, totals.investPaid, totals.investOutstanding) +
-      '</div>' +
-    '</section>';
-
-    // --- Per-category detail ---
-    var categoryOrder = [
-      'Tax Withheld', 'Tax To Pay', 'ACC Withheld', 'ACC To Pay',
-      'GST Collected', 'Spend', 'Save', 'Donate', 'Invest'
-    ];
-    var catMap = {};
-    categories.forEach(function(cat) { catMap[cat.category] = cat; });
-
-    html += '<section class="flow-group">' +
-      '<h3 class="flow-group__title">By category</h3>' +
-      '<div class="category-list">';
-
-    categoryOrder.forEach(function(name) {
-      var cat = catMap[name];
-      if (!cat || !cat.items || cat.items.length === 0) return;
-      html += renderCategoryBlock(cat);
+    // --- Per-scope tiles ---
+    scopes.forEach(function(group) {
+      if (group.scope === 'bridge') return; // covered by the tile above
+      html += '<section class="flow-group">' +
+        '<h3 class="flow-group__title">' + escapeHtml(group.label) +
+          ' <span class="muted small">' + formatCurrency(group.outstanding) + ' outstanding of ' +
+          formatCurrency(group.allocated) + '</span></h3>' +
+        '<div class="flow-grid">' +
+          group.categories.map(function(cat) {
+            return cat.isWithheld
+              ? tileWithheldPaid(cat.category + ' (at source)', cat.paid)
+              : tileSplit(cat.category, cat.allocated, cat.paid, cat.outstanding);
+          }).join('') +
+        '</div>' +
+      '</section>';
     });
 
-    html += '</div></section>';
+    // --- Per-category detail, grouped by scope ---
+    html += '<section class="flow-group">' +
+      '<h3 class="flow-group__title">By category</h3>';
+
+    scopes.forEach(function(group) {
+      html += '<h4 class="muted" style="margin:0.75rem 0 0.35rem;">' + escapeHtml(group.label) + '</h4>' +
+        '<div class="category-list">' +
+        group.categories.map(renderCategoryBlock).join('') +
+        '</div>';
+    });
+
+    html += '</section>';
 
     body.innerHTML = html;
   }).catch(function(err) {
@@ -167,6 +167,14 @@ function renderBudgetSummary() {
 function pctOf(part, total) {
   if (!total || total === 0) return '0%';
   return ((Number(part) / Number(total)) * 100).toFixed(0) + '%';
+}
+
+function tilePlain(label, amount, detail) {
+  return '<div class="mini-tile">' +
+    '<span class="mini-tile__label">' + escapeHtml(label) + '</span>' +
+    '<span class="mini-tile__value">' + formatCurrency(amount || 0) + '</span>' +
+    '<span class="mini-tile__detail">' + escapeHtml(detail || '') + '</span>' +
+  '</div>';
 }
 
 function tileWithheldPaid(label, amount) {
@@ -195,12 +203,14 @@ function tileSplit(label, allocated, paid, outstanding) {
 function renderCategoryBlock(cat) {
   var isWithheld = cat.isWithheld;
   var barPct = pctOf(cat.paid, cat.allocated);
+  var actionLabel = settleActionLabel(cat.settle);
+  var movedWord = cat.settle === 'hold' ? 'set aside' : 'moved';
 
   var html = '<article class="category-block">' +
     '<header class="category-block__header">' +
       '<div>' +
         '<h4>' + escapeHtml(cat.category) + (isWithheld ? ' <span class="tag tag--auto">auto-paid</span>' : '') + '</h4>' +
-        '<p class="muted">' + formatCurrency(cat.paid) + ' moved' +
+        '<p class="muted">' + formatCurrency(cat.paid) + ' ' + movedWord +
           (!isWithheld ? ' · <strong>' + formatCurrency(cat.outstanding) + ' outstanding</strong>' : '') +
           ' · ' + formatCurrency(cat.allocated) + ' total' +
         '</p>' +
@@ -238,7 +248,8 @@ function renderCategoryBlock(cat) {
 
     if (!isWithheld) {
       if (status === 'allocated') {
-        html += '<button type="button" class="btn-small btn-primary" onclick="markAllocationPaid(\'' + item.allocation_id + '\')">Mark Paid</button>';
+        html += '<button type="button" class="btn-small btn-primary" onclick="markAllocationPaid(\'' + item.allocation_id + '\')">' +
+          escapeHtml(actionLabel) + '</button>';
       } else if (status === 'paid') {
         html += '<button type="button" class="btn-small btn-subtle" onclick="markAllocationUnpaid(\'' + item.allocation_id + '\')">Undo</button>';
       }
@@ -318,11 +329,19 @@ function renderBudgetAllocate() {
       };
     });
 
+    // Flag pre-company rules so an old cascade is never applied by accident.
+    var ruleOptions = rules.map(function(r) {
+      return {
+        id: r.rule_id,
+        label: r.name + (r.model === 'company' ? '' : ' (sole trader)')
+      };
+    });
+
     var html =
       '<form id="allocate-form" class="form-card">' +
         '<div class="form-row">' +
           '<label>Invoice ' + buildSelect('ba-invoice', invoiceOptions, 'id', 'label', { required: true }) + '</label>' +
-          '<label>Budget rule ' + buildSelect('ba-rule', rules, 'rule_id', 'name', { required: true, selected: defaultRule.rule_id, placeholder: false }) + '</label>' +
+          '<label>Budget rule ' + buildSelect('ba-rule', ruleOptions, 'id', 'label', { required: true, selected: defaultRule.rule_id, placeholder: false }) + '</label>' +
         '</div>' +
         '<div class="form-actions">' +
           '<button type="button" onclick="previewAllocation()">Preview allocation</button>' +
@@ -336,6 +355,43 @@ function renderBudgetAllocate() {
   });
 }
 
+/**
+ * Cascade rows for the preview, built from the stage figures the server
+ * returned. Company and sole-trader rules report different stages.
+ */
+function cascadeRows(model, s, currency) {
+  var rows = [];
+  var add = function(label, value, opts) {
+    opts = opts || {};
+    if (opts.onlyIfNonZero && !value) return;
+    rows.push({ label: label, value: value, negative: !!opts.negative, strong: !!opts.strong });
+  };
+
+  add('Gross (billed hours)', s.gross);
+  add('Less withheld at source', s.withheld, { negative: true, onlyIfNonZero: true });
+
+  if (model === 'company') {
+    add('Business income', s.businessIncome, { strong: true });
+    add('Less business allocations (tax, ACC, reserve)', s.businessObligations, { negative: true, onlyIfNonZero: true });
+    add('Owner Pay — drawn to personal', s.ownerPay, { strong: true });
+    add('Less personal tax & ACC', s.personalObligations, { negative: true, onlyIfNonZero: true });
+    add('Personal net to distribute', s.personalNet, { strong: true });
+  } else {
+    add('Adjusted', s.adjusted, { strong: true });
+    add('Less obligations (tax/ACC to pay)', s.obligations, { negative: true, onlyIfNonZero: true });
+    add('Net to distribute', s.net, { strong: true });
+  }
+
+  add('Plus GST collected (held for IRD)', s.gst, { onlyIfNonZero: true });
+
+  return rows.map(function(r) {
+    return '<div' + (r.strong ? ' class="preview-numbers__key"' : '') + '>' +
+      '<span class="muted">' + escapeHtml(r.label) + '</span>' +
+      '<strong>' + (r.negative ? '&minus;' : '') + formatCurrency(r.value, currency) + '</strong>' +
+    '</div>';
+  }).join('');
+}
+
 function previewAllocation() {
   var invoiceId = document.getElementById('ba-invoice').value;
   var ruleId = document.getElementById('ba-rule').value;
@@ -345,103 +401,67 @@ function previewAllocation() {
     return;
   }
 
-  var rule = (AppCache.budgetRules || []).find(function(r) { return r.rule_id === ruleId; });
-  if (!rule) { showToast('Rule not found', 'error'); return; }
-
   var preview = document.getElementById('allocation-preview');
   preview.innerHTML = '<div aria-busy="true">Calculating...</div>';
 
-  serverCall('getInvoiceDetails', invoiceId).then(function(data) {
-    var inv = data.invoice;
-    var gross = (inv.time_subtotal != null && inv.time_subtotal !== '')
-      ? Number(inv.time_subtotal) : (Number(inv.subtotal) || 0);
-    var gstAmount = (inv.include_gst === true || inv.include_gst === 'true' || inv.include_gst === 'TRUE')
-      ? (Number(inv.gst_amount) || 0) : 0;
-    var currency = (data.business && data.business.currency) || 'NZD';
+  // The server computes this with the same code that writes the allocations,
+  // so a preview can never disagree with the result.
+  serverCall('previewAllocationFromClient', invoiceId + '|' + ruleId).then(function(data) {
+    var currency = data.currency || 'NZD';
+    var lines = data.lines || [];
+    var isCompany = data.model === 'company';
 
-    var WITHHELD = ['Tax Withheld', 'ACC Withheld'];
-    var OBLIGATIONS = ['Tax To Pay', 'ACC To Pay'];
-
-    var withheldAmount = 0;
-    BUDGET_CATEGORIES_UI.forEach(function(cat, i) {
-      if (WITHHELD.indexOf(cat) !== -1) {
-        withheldAmount += Math.round(gross * (Number(rule[BUDGET_PCT_FIELDS[i]]) || 0) * 100) / 100;
-      }
-    });
-    var adjusted = gross - withheldAmount;
-
-    var obligationAmount = 0;
-    BUDGET_CATEGORIES_UI.forEach(function(cat, i) {
-      if (OBLIGATIONS.indexOf(cat) !== -1) {
-        obligationAmount += Math.round(adjusted * (Number(rule[BUDGET_PCT_FIELDS[i]]) || 0) * 100) / 100;
-      }
-    });
-    var net = adjusted - obligationAmount;
+    var explainer = isCompany
+      ? 'Budget is allocated from billed hours only (expenses are pass-throughs). ' +
+        'Business tax, ACC and reserve come off business income; what is left is Owner Pay, ' +
+        'drawn to your personal account. Personal tax and ACC come off Owner Pay, and ' +
+        'Donate/Save/Invest/Spend split what remains. GST is held for the IRD and sits outside the split.'
+      : 'Pre-company rule: withheld comes off gross to give adjusted, tax/ACC to pay come off ' +
+        'adjusted to give net, and Donate/Save/Invest/Spend split the net.';
 
     var html =
       '<article class="preview-card">' +
         '<header>' +
           '<h3>Preview</h3>' +
-          '<p class="muted">' + escapeHtml(inv.invoice_id) + ' · ' + escapeHtml((data.business && data.business.name) || '') +
-            ' · Rule: <strong>' + escapeHtml(rule.name) + '</strong></p>' +
+          '<p class="muted">' + escapeHtml(data.invoice_id) + ' · ' + escapeHtml(data.business_name || '') +
+            ' · Rule: <strong>' + escapeHtml(data.rule.name) + '</strong>' +
+            (isCompany ? '' : ' <span class="tag">sole trader</span>') + '</p>' +
         '</header>' +
-        '<div class="preview-numbers">' +
-          '<div><span class="muted">Gross (billed hours)</span><strong>' + formatCurrency(gross, currency) + '</strong></div>' +
-          (withheldAmount > 0 ? '<div><span class="muted">Withheld (at source)</span><strong>&minus;' + formatCurrency(withheldAmount, currency) + '</strong></div>' : '') +
-          '<div><span class="muted">Adjusted</span><strong>' + formatCurrency(adjusted, currency) + '</strong></div>' +
-          (obligationAmount > 0 ? '<div><span class="muted">Obligations (Tax/ACC to pay)</span><strong>&minus;' + formatCurrency(obligationAmount, currency) + '</strong></div>' : '') +
-          '<div><span class="muted">Net to distribute</span><strong>' + formatCurrency(net, currency) + '</strong></div>' +
-        '</div>' +
-        '<p class="muted" style="font-size:0.78rem;margin:0 0 0.5rem;">' +
-          'Budget is allocated from billed hours only (expenses are pass-throughs). ' +
-          'Withheld categories are deducted from gross to give adjusted. ' +
-          'Tax/ACC to pay are deducted from adjusted to give net. ' +
-          'Distribution categories (Donate/Save/Invest/Spend) split the net.' +
-        '</p>' +
+        '<div class="preview-numbers">' + cascadeRows(data.model, data.stages || {}, currency) + '</div>' +
+        '<p class="muted" style="font-size:0.78rem;margin:0 0 0.5rem;">' + explainer + '</p>' +
         '<table class="data-table">' +
           '<thead><tr><th>Category</th><th class="number">%</th><th class="number">Amount</th><th>Note</th></tr></thead><tbody>';
 
-    var allocTotal = 0;
-    BUDGET_CATEGORIES_UI.forEach(function(cat, i) {
-      if (cat === 'GST Collected') {
-        if (gstAmount > 0) {
-          allocTotal += gstAmount;
-          html += '<tr>' +
-            '<td>' + escapeHtml(cat) + '</td>' +
-            '<td class="number">—</td>' +
-            '<td class="number">' + formatCurrency(gstAmount, currency) + '</td>' +
-            '<td class="muted">From invoice GST</td>' +
-          '</tr>';
-        }
-        return;
+    var basisNote = {
+      gross: 'From gross',
+      invoice_gst: 'From invoice GST',
+      business_income: 'From business income',
+      remainder: 'Remainder — business income less business allocations',
+      owner_pay: 'From Owner Pay',
+      personal_net: 'From personal net',
+      adjusted: 'From adjusted',
+      net: 'From net'
+    };
+
+    var lastScope = null;
+    lines.forEach(function(line) {
+      if (line.scope !== lastScope) {
+        lastScope = line.scope;
+        html += '<tr class="group-row"><td colspan="4"><strong>' + escapeHtml(scopeLabel(line.scope)) + '</strong></td></tr>';
       }
-      var pct = Number(rule[BUDGET_PCT_FIELDS[i]]) || 0;
-      var isWithheld = WITHHELD.indexOf(cat) !== -1;
-      var isObligation = OBLIGATIONS.indexOf(cat) !== -1;
-      var amount;
-      var note;
-      if (isWithheld) {
-        amount = Math.round(gross * pct * 100) / 100;
-        note = 'From gross';
-      } else if (isObligation) {
-        amount = Math.round(adjusted * pct * 100) / 100;
-        note = 'From adjusted';
-      } else {
-        amount = Math.round(net * pct * 100) / 100;
-        note = 'From net';
-      }
-      allocTotal += amount;
       html += '<tr>' +
-        '<td>' + escapeHtml(cat) + (isWithheld ? ' <span class="tag tag--auto">auto-paid</span>' : '') + '</td>' +
-        '<td class="number">' + formatPercent(pct) + '</td>' +
-        '<td class="number">' + formatCurrency(amount, currency) + '</td>' +
-        '<td class="muted">' + note + '</td>' +
+        '<td>' + escapeHtml(line.label) +
+          (line.settle === 'auto_paid' ? ' <span class="tag tag--auto">auto-paid</span>' : '') +
+          (line.isTransfer ? ' <span class="tag">transfer</span>' : '') + '</td>' +
+        '<td class="number">' + (line.pct == null ? '—' : formatPercent(line.pct)) + '</td>' +
+        '<td class="number">' + formatCurrency(line.amount, currency) + '</td>' +
+        '<td class="muted">' + escapeHtml(basisNote[line.basis] || '') + '</td>' +
       '</tr>';
     });
 
-    html += '<tr class="total-row"><td><strong>Total</strong></td><td></td>' +
-      '<td class="number"><strong>' + formatCurrency(allocTotal, currency) + '</strong></td>' +
-      '<td></td></tr>';
+    html += '<tr class="total-row"><td><strong>Total (excl. Owner Pay transfer)</strong></td><td></td>' +
+      '<td class="number"><strong>' + formatCurrency(data.total, currency) + '</strong></td>' +
+      '<td class="muted">equals the invoice total</td></tr>';
     html += '</tbody></table>' +
       '<div class="form-actions">' +
         '<button type="button" class="btn-primary" onclick="confirmAllocation()">Confirm allocation</button>' +
@@ -453,6 +473,13 @@ function previewAllocation() {
   }).catch(function(err) {
     preview.innerHTML = '<p class="error">Error: ' + escapeHtml(err.message) + '</p>';
   });
+}
+
+function scopeLabel(scope) {
+  var reg = AppCache.budgetCategories;
+  var scopes = (reg && reg.scopes) || [];
+  var found = scopes.find(function(s) { return s.scope === scope; });
+  return found ? found.label : scope;
 }
 
 function confirmAllocation() {

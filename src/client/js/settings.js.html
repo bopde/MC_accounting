@@ -410,13 +410,17 @@ function renderAccountSettings() {
             '<option value="GBP">GBP</option>' +
             '<option value="EUR">EUR</option>' +
           '</select></label>' +
+          '<label>Scope <select id="acc-scope">' +
+            '<option value="business">Business</option>' +
+            '<option value="personal">Personal</option>' +
+          '</select></label>' +
           '<label>Purpose <input type="text" id="acc-purpose" placeholder="e.g. savings, tax, spending"></label>' +
         '</div>' +
         '<div class="form-actions"><button type="submit">Add Account</button></div>' +
       '</form></div></details>';
 
     if (accounts.length > 0) {
-      html += '<table><thead><tr><th>ID</th><th>Name</th><th>Type</th><th>Currency</th><th>Purpose</th><th>Active</th></tr></thead><tbody>';
+      html += '<table><thead><tr><th>ID</th><th>Name</th><th>Type</th><th>Currency</th><th>Scope</th><th>Purpose</th><th>Active</th></tr></thead><tbody>';
       accounts.forEach(function(a) {
         var isActive = a.active === true || a.active === 'TRUE' || a.active === 'true';
         html += '<tr style="' + (isActive ? '' : 'opacity:0.5;') + '">' +
@@ -424,6 +428,7 @@ function renderAccountSettings() {
           '<td>' + escapeHtml(a.name) + '</td>' +
           '<td>' + escapeHtml(a.type) + '</td>' +
           '<td>' + escapeHtml(a.currency || 'NZD') + '</td>' +
+          '<td>' + escapeHtml(a.scope || '—') + '</td>' +
           '<td>' + escapeHtml(a.purpose) + '</td>' +
           '<td>' +
             (isActive
@@ -448,6 +453,7 @@ function submitAccount(event) {
     name: document.getElementById('acc-name').value,
     type: document.getElementById('acc-type').value,
     currency: document.getElementById('acc-currency').value || 'NZD',
+    scope: document.getElementById('acc-scope').value,
     purpose: document.getElementById('acc-purpose').value
   };
 
@@ -470,40 +476,90 @@ function toggleAccount(rowIndex, active) {
 
 // --- Budget Rules ---
 
-var _rulePctFields = [
-  { id: 'br-tax-withheld', label: 'Tax Withheld %', field: 'tax_withheld_pct', tier: 'withheld', default: '0' },
-  { id: 'br-acc-withheld', label: 'ACC Withheld %', field: 'acc_withheld_pct', tier: 'withheld', default: '0' },
-  { id: 'br-tax-to-pay', label: 'Tax To Pay %', field: 'tax_to_pay_pct', tier: 'obligation', default: '0.28' },
-  { id: 'br-acc-to-pay', label: 'ACC To Pay %', field: 'acc_to_pay_pct', tier: 'obligation', default: '0.02' },
-  { id: 'br-donate', label: 'Donate %', field: 'donate_pct', tier: 'distribution', default: '0.05' },
-  { id: 'br-save', label: 'Save %', field: 'save_pct', tier: 'distribution', default: '0.10' },
-  { id: 'br-invest', label: 'Invest %', field: 'invest_pct', tier: 'distribution', default: '0.15' },
-  { id: 'br-spend', label: 'Spend %', field: 'spend_pct', tier: 'distribution', default: '0.70' }
-];
+/**
+ * The form is generated from the server-side category registry
+ * (AppCache.budgetCategories), so a new bucket needs no change here.
+ * Company rules use the biz_/per_ percentage fields; pre-company rules keep
+ * their original three-tier fields.
+ */
+var RULE_FORM_GROUPS = {
+  company: [
+    { group: 'withholding', title: 'Withholding at source',
+      hint: 'Deducted from gross before anything else. Usually 0% for a company.', collapsible: true },
+    { group: 'business', title: 'Business — % of business income',
+      hint: 'Stays in the business account. Whatever is left becomes Owner Pay.' },
+    { group: 'personal_obligation', title: 'Personal — % of Owner Pay',
+      hint: 'Taken off the money you draw out of the company.' },
+    { group: 'personal_distribution', title: 'Personal distribution — % of what remains',
+      hint: 'Must sum to 100%.' }
+  ],
+  sole_trader: [
+    { group: 'withheld', title: 'Tier 1 — Withheld', hint: 'Deducted from gross → gives adjusted.' },
+    { group: 'obligation', title: 'Tier 2 — Obligations', hint: 'Deducted from adjusted → gives net.' },
+    { group: 'distribution', title: 'Tier 3 — Distribution', hint: 'Split of net, must sum to 100%.' }
+  ]
+};
 
 var _editingRuleId = null;
+var _ruleFormModels = {};
 
-function buildRuleFormFields(prefix, values) {
+function ruleDefsForModel(model) {
+  var reg = AppCache.budgetCategories;
+  if (!reg) return [];
+  var defs = (model === 'sole_trader') ? (reg.legacy || []) : (reg.categories || []);
+  return defs.filter(function(d) { return !!d.pctField; });
+}
+
+function ruleDefsInGroup(model, group) {
+  return ruleDefsForModel(model).filter(function(d) { return d.group === group; });
+}
+
+function ruleInputId(prefix, def) {
+  return prefix + '-' + def.pctField;
+}
+
+function ruleModelExplainer(model) {
+  if (model === 'sole_trader') {
+    return 'Pre-company rule: withheld comes off gross to give adjusted, obligations come off ' +
+      'adjusted to give net, and the distribution splits the net.';
+  }
+  return 'Business tax, ACC and reserve come off business income. What is left is Owner Pay, ' +
+    'drawn to your personal account, which personal tax and ACC then come off. The distribution ' +
+    'splits what remains. GST is taken from the invoice and is not a percentage here.';
+}
+
+function buildRuleFormFields(prefix, values, model) {
+  var groups = RULE_FORM_GROUPS[model] || RULE_FORM_GROUPS.company;
+
   var html = '<div class="form-row">' +
-    '<label>Rule Name <input type="text" id="' + prefix + '-name" required placeholder="e.g. Default Split" value="' + escapeHtml(values.name || '') + '"></label>' +
+    '<label>Rule Name <input type="text" id="' + prefix + '-name" required placeholder="e.g. Company Default" value="' + escapeHtml(values.name || '') + '"></label>' +
   '</div>' +
-  '<p class="muted" style="margin:0.5rem 0;font-size:0.82rem;">' +
-    '<strong>Tier 1 — Withheld:</strong> deducted from gross → gives adjusted. ' +
-    '<strong>Tier 2 — Obligations:</strong> deducted from adjusted → gives net. ' +
-    '<strong>Tier 3 — Distribution:</strong> split of net, must sum to 100%. ' +
-    'Enter as decimals (e.g. 0.28 = 28%).' +
-  '</p>' +
-  '<p class="muted" style="margin:0 0 0.5rem;font-size:0.78rem;"><em>Tier 1 — Withheld (from gross)</em></p>' +
-  '<div class="form-row">';
+  '<p class="muted" style="margin:0.5rem 0;font-size:0.82rem;">' + escapeHtml(ruleModelExplainer(model)) +
+    ' Enter as decimals (e.g. 0.28 = 28%).</p>';
 
-  _rulePctFields.forEach(function(f, i) {
-    var val = values[f.field] !== undefined ? values[f.field] : f.default;
-    html += '<label>' + f.label + ' <input type="number" id="' + prefix + '-' + f.field + '" step="0.01" value="' + val + '" required></label>';
-    if (i === 1) html += '</div><p class="muted" style="margin:0 0 0.5rem;font-size:0.78rem;"><em>Tier 2 — Obligations (from adjusted)</em></p><div class="form-row">';
-    if (i === 3) html += '</div><p class="muted" style="margin:0 0 0.5rem;font-size:0.78rem;"><em>Tier 3 — Distribution (from net, must = 100%)</em></p><div class="form-row">';
+  groups.forEach(function(g) {
+    var defs = ruleDefsInGroup(model, g.group);
+    if (!defs.length) return;
+
+    var fields = '<p class="muted" style="margin:0 0 0.4rem;font-size:0.78rem;"><em>' + escapeHtml(g.title) +
+        '</em> — ' + escapeHtml(g.hint) + '</p>' +
+      '<div class="form-row">' +
+      defs.map(function(d) {
+        var val = (values[d.pctField] !== undefined && values[d.pctField] !== '')
+          ? values[d.pctField]
+          : (d.defaultPct == null ? 0 : d.defaultPct);
+        return '<label>' + escapeHtml(d.label) + ' % ' +
+          '<input type="number" id="' + ruleInputId(prefix, d) + '" step="0.0001" min="0" value="' + val + '" required></label>';
+      }).join('') +
+      '</div>';
+
+    html += g.collapsible
+      ? '<details style="margin:0.25rem 0 0.5rem;"><summary class="muted small">' +
+        escapeHtml(g.title) + ' (optional)</summary><div>' + fields + '</div></details>'
+      : fields;
   });
 
-  html += '</div>' +
+  html +=
     '<div class="form-row">' +
       '<label><input type="checkbox" id="' + prefix + '-default"' + (values.is_default ? ' checked' : '') + '> Set as default rule</label>' +
       '<label>Notes <input type="text" id="' + prefix + '-notes" value="' + escapeHtml(values.notes || '') + '"></label>' +
@@ -512,22 +568,32 @@ function buildRuleFormFields(prefix, values) {
   return html;
 }
 
-function attachRuleSumListeners(prefix) {
-  _rulePctFields.forEach(function(f) {
-    var el = document.getElementById(prefix + '-' + f.field);
+function attachRuleSumListeners(prefix, model) {
+  _ruleFormModels[prefix] = model;
+  ruleDefsForModel(model).forEach(function(d) {
+    var el = document.getElementById(ruleInputId(prefix, d));
     if (el) el.addEventListener('input', function() { updateRuleSum(prefix); });
   });
   updateRuleSum(prefix);
 }
 
 function readRuleFormData(prefix) {
-  var data = { name: document.getElementById(prefix + '-name').value };
-  _rulePctFields.forEach(function(f) {
-    data[f.field] = Number(document.getElementById(prefix + '-' + f.field).value);
+  var model = _ruleFormModels[prefix] || 'company';
+  var data = { name: document.getElementById(prefix + '-name').value, model: model };
+  ruleDefsForModel(model).forEach(function(d) {
+    var el = document.getElementById(ruleInputId(prefix, d));
+    data[d.pctField] = el ? Number(el.value) : 0;
   });
   data.is_default = document.getElementById(prefix + '-default').checked;
   data.notes = document.getElementById(prefix + '-notes').value;
   return data;
+}
+
+function sumRuleGroup(prefix, model, group) {
+  return ruleDefsInGroup(model, group).reduce(function(sum, d) {
+    var el = document.getElementById(ruleInputId(prefix, d));
+    return sum + (el ? (Number(el.value) || 0) : 0);
+  }, 0);
 }
 
 function renderRuleSettings() {
@@ -538,46 +604,65 @@ function renderRuleSettings() {
     var html =
       '<details class="add-form-panel"><summary>+ Add New Budget Rule</summary><div>' +
       '<form id="add-rule-form" onsubmit="submitBudgetRule(event)">' +
-        buildRuleFormFields('br', {}) +
+        buildRuleFormFields('br', {}, 'company') +
         '<div class="form-actions"><button type="submit">Add Rule</button></div>' +
       '</form></div></details>';
 
     html += '<div id="rule-edit-area"></div>';
 
-    if (rules.length > 0) {
-      html += '<div class="scroll-x"><table class="data-table"><thead><tr>' +
-        '<th>Name</th>' +
-        '<th class="number">Tax Wtd</th><th class="number">ACC Wtd</th>' +
-        '<th class="number">Tax Pay</th><th class="number">ACC Pay</th>' +
-        '<th class="number">Donate</th><th class="number">Save</th>' +
-        '<th class="number">Invest</th><th class="number">Spend</th>' +
-        '<th>Default</th><th>Active</th><th></th></tr></thead><tbody>';
+    var companyRules = rules.filter(function(r) { return ruleModelOf(r) === 'company'; });
+    var legacyRules = rules.filter(function(r) { return ruleModelOf(r) !== 'company'; });
 
-      rules.forEach(function(r) {
-        var isDef = r.is_default === true || r.is_default === 'TRUE' || r.is_default === 'true';
-        var isActive = r.active === true || r.active === 'TRUE' || r.active === 'true' || r.active === '' || r.active === undefined;
-        html += '<tr id="rule-row-' + escapeHtml(r.rule_id) + '" style="' + (isActive ? '' : 'opacity:0.5;') + '"><td><strong>' + escapeHtml(r.name) + '</strong></td>';
-        _rulePctFields.forEach(function(f) {
-          html += '<td class="number">' + formatPercent(r[f.field]) + '</td>';
-        });
-        html += '<td>' + (isDef ? 'Yes' : '') + '</td>' +
-          '<td>' +
-            (isActive
-              ? '<button type="button" class="btn-small btn-subtle" onclick="toggleBudgetRule(' + r._rowIndex + ', false)">Deactivate</button>'
-              : '<button type="button" class="btn-small" onclick="toggleBudgetRule(' + r._rowIndex + ', true)">Activate</button>') +
-          '</td>' +
-          '<td class="actions"><button type="button" class="btn-small btn-subtle" onclick="editBudgetRule(\'' + escapeHtml(r.rule_id) + '\')">Edit</button></td></tr>';
-      });
-      html += '</tbody></table></div>';
-    } else {
+    if (rules.length === 0) {
       html += '<p>No budget rules configured. Add one to start allocating invoice payments.</p>';
+    } else {
+      html += renderRuleTable('Company rules', companyRules, 'company');
+      html += renderRuleTable('Pre-company rules (sole trader)', legacyRules, 'sole_trader');
     }
 
     content.innerHTML = html;
-    attachRuleSumListeners('br');
+    attachRuleSumListeners('br', 'company');
   }).catch(function(err) {
     content.innerHTML = '<p>Error: ' + escapeHtml(err.message) + '</p>';
   });
+}
+
+function renderRuleTable(title, rules, model) {
+  if (!rules.length) return '';
+  var defs = ruleDefsForModel(model);
+
+  var html = '<h4 style="margin:1.25rem 0 0.4rem;">' + escapeHtml(title) + '</h4>' +
+    '<div class="scroll-x"><table class="data-table"><thead><tr><th>Name</th>' +
+    defs.map(function(d) { return '<th class="number">' + escapeHtml(d.label) + '</th>'; }).join('') +
+    (model === 'company' ? '<th class="number">Owner Pay</th>' : '') +
+    '<th>Default</th><th>Active</th><th></th></tr></thead><tbody>';
+
+  rules.forEach(function(r) {
+    var isDef = isFlagTrue(r.is_default);
+    var isActive = r.active === '' || r.active === undefined || isFlagTrue(r.active);
+
+    html += '<tr id="rule-row-' + escapeHtml(r.rule_id) + '" style="' + (isActive ? '' : 'opacity:0.5;') + '">' +
+      '<td><strong>' + escapeHtml(r.name) + '</strong></td>' +
+      defs.map(function(d) { return '<td class="number">' + formatPercent(r[d.pctField]) + '</td>'; }).join('');
+
+    if (model === 'company') {
+      var bizSum = ruleDefsInGroup('company', 'business').reduce(function(s, d) {
+        return s + (Number(r[d.pctField]) || 0);
+      }, 0);
+      html += '<td class="number"><strong>' + formatPercent(1 - bizSum) + '</strong></td>';
+    }
+
+    html += '<td>' + (isDef ? 'Yes' : '') + '</td>' +
+      '<td>' +
+        (isActive
+          ? '<button type="button" class="btn-small btn-subtle" onclick="toggleBudgetRule(' + r._rowIndex + ', false)">Deactivate</button>'
+          : '<button type="button" class="btn-small" onclick="toggleBudgetRule(' + r._rowIndex + ', true)">Activate</button>') +
+      '</td>' +
+      '<td class="actions"><button type="button" class="btn-small btn-subtle" onclick="editBudgetRule(\'' + escapeHtml(r.rule_id) + '\')">Edit</button></td></tr>';
+  });
+
+  html += '</tbody></table></div>';
+  return html;
 }
 
 function editBudgetRule(ruleId) {
@@ -585,17 +670,18 @@ function editBudgetRule(ruleId) {
   if (!rule) { showToast('Rule not found in cache', 'error'); return; }
 
   _editingRuleId = ruleId;
+  var model = ruleModelOf(rule);
   var area = document.getElementById('rule-edit-area');
 
-  var isDef = rule.is_default === true || rule.is_default === 'TRUE' || rule.is_default === 'true';
-  var values = { name: rule.name, notes: rule.notes, is_default: isDef };
-  _rulePctFields.forEach(function(f) { values[f.field] = rule[f.field]; });
+  var values = { name: rule.name, notes: rule.notes, is_default: isFlagTrue(rule.is_default) };
+  ruleDefsForModel(model).forEach(function(d) { values[d.pctField] = rule[d.pctField]; });
 
   area.innerHTML =
     '<article style="margin:1rem 0;">' +
-      '<header><h4>Edit Rule: ' + escapeHtml(rule.name) + '</h4></header>' +
+      '<header><h4>Edit Rule: ' + escapeHtml(rule.name) +
+        (model === 'company' ? '' : ' <span class="tag">sole trader</span>') + '</h4></header>' +
       '<form id="edit-rule-form" onsubmit="submitBudgetRuleEdit(event)">' +
-        buildRuleFormFields('bre', values) +
+        buildRuleFormFields('bre', values, model) +
         '<div class="form-actions">' +
           '<button type="submit">Save Changes</button>' +
           '<button type="button" class="btn-subtle" onclick="cancelRuleEdit()">Cancel</button>' +
@@ -603,7 +689,7 @@ function editBudgetRule(ruleId) {
       '</form>' +
     '</article>';
 
-  attachRuleSumListeners('bre');
+  attachRuleSumListeners('bre', model);
   area.scrollIntoView({ behavior: 'smooth' });
 }
 
@@ -614,24 +700,41 @@ function cancelRuleEdit() {
 }
 
 function updateRuleSum(prefix) {
-  var withheldSum = 0, obligationSum = 0, distSum = 0;
-  _rulePctFields.forEach(function(f) {
-    var val = Number(document.getElementById(prefix + '-' + f.field).value) || 0;
-    if (f.tier === 'withheld') withheldSum += val;
-    else if (f.tier === 'obligation') obligationSum += val;
-    else distSum += val;
-  });
-
   var display = document.getElementById(prefix + '-sum-display');
-  if (display) {
-    var distOk = Math.abs(distSum - 1.0) < 0.001;
+  if (!display) return;
+
+  var model = _ruleFormModels[prefix] || 'company';
+  var pct = function(v) { return (v * 100).toFixed(1) + '%'; };
+  var ok = 'var(--sage)';
+  var bad = 'var(--danger)';
+
+  if (model === 'company') {
+    var biz = sumRuleGroup(prefix, model, 'business');
+    var perObl = sumRuleGroup(prefix, model, 'personal_obligation');
+    var dist = sumRuleGroup(prefix, model, 'personal_distribution');
+    var bizOk = biz <= 1.000001;
+    var distOk = Math.abs(dist - 1.0) < 0.001;
+
     display.innerHTML =
-      'Withheld (from gross): ' + (withheldSum * 100).toFixed(1) + '% &nbsp; ' +
-      'Obligations (from adjusted): ' + (obligationSum * 100).toFixed(1) + '% &nbsp; ' +
-      'Distribution (from net): <strong style="color:' + (distOk ? 'var(--sage)' : 'var(--danger)') + '">' +
-      (distSum * 100).toFixed(1) + '%</strong>' +
-      (distOk ? '' : ' <span style="color:var(--danger)">&mdash; must equal 100%</span>');
+      'Business keeps ' + pct(biz) + ' of income &rarr; ' +
+      '<strong style="color:' + (bizOk ? ok : bad) + '">Owner Pay ' + pct(1 - biz) + '</strong>' +
+      (bizOk ? '' : ' <span style="color:' + bad + '">&mdash; business allocations exceed 100%</span>') +
+      '<br>Personal tax &amp; ACC: ' + pct(perObl) + ' of Owner Pay &nbsp; ' +
+      'Distribution: <strong style="color:' + (distOk ? ok : bad) + '">' + pct(dist) + '</strong>' +
+      (distOk ? '' : ' <span style="color:' + bad + '">&mdash; must equal 100%</span>');
+    return;
   }
+
+  var withheldSum = sumRuleGroup(prefix, model, 'withheld');
+  var obligationSum = sumRuleGroup(prefix, model, 'obligation');
+  var legacyDist = sumRuleGroup(prefix, model, 'distribution');
+  var legacyDistOk = Math.abs(legacyDist - 1.0) < 0.001;
+
+  display.innerHTML =
+    'Withheld (from gross): ' + pct(withheldSum) + ' &nbsp; ' +
+    'Obligations (from adjusted): ' + pct(obligationSum) + ' &nbsp; ' +
+    'Distribution (from net): <strong style="color:' + (legacyDistOk ? ok : bad) + '">' + pct(legacyDist) + '</strong>' +
+    (legacyDistOk ? '' : ' <span style="color:' + bad + '">&mdash; must equal 100%</span>');
 }
 
 function submitBudgetRule(event) {

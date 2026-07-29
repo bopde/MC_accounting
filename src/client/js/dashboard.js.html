@@ -424,29 +424,42 @@ function dashContracts(contracts) {
 }
 
 function dashBudget(budget) {
-  var html = '<article><header><h3 style="margin:0;">Budget Status</h3></header>' +
-    '<div class="dash-budget-grid">';
+  var html = '<article><header><h3 style="margin:0;">Budget Status</h3></header>';
 
-  budget.forEach(function(cat) {
-    var pct = cat.allocated > 0 ? Math.round(cat.paid / cat.allocated * 100) : 0;
-    html += '<div class="dash-budget-item">' +
-      '<div class="dash-budget-item__header">' +
-        '<span>' + escapeHtml(cat.category) + '</span>' +
-        '<span class="muted">' + formatCurrency(cat.allocated) + '</span>' +
-      '</div>' +
-      '<div style="height:8px;background:var(--rule-2);border-radius:4px;overflow:hidden;margin-bottom:0.6rem;">' +
-        '<div style="height:100%;width:' + pct + '%;background:var(--fern);border-radius:4px;transition:width 0.3s;"></div>' +
-      '</div>' +
-      '<div class="dash-budget-item__detail">' +
-        '<span>Paid ' + formatCurrency(cat.paid) + '</span>' +
-        (cat.outstanding > 0
-          ? '<span style="color:var(--warn);">Owe ' + formatCurrency(cat.outstanding) + '</span>'
-          : '<span style="color:var(--sage);">Complete</span>') +
-      '</div>' +
-    '</div>';
+  // Grouped by scope so business obligations never read as personal money.
+  var scopes = (AppCache.budgetCategories && AppCache.budgetCategories.scopes) || [];
+  var order = scopes.map(function(s) { return s.scope; });
+  var seen = {};
+  budget.forEach(function(cat) { seen[cat.scope] = true; });
+
+  order.filter(function(scope) { return seen[scope]; }).forEach(function(scope) {
+    var label = (scopes.find(function(s) { return s.scope === scope; }) || {}).label || scope;
+    html += '<h4 class="muted small" style="margin:0.6rem 0 0.35rem;text-transform:uppercase;letter-spacing:0.08em;">' +
+      escapeHtml(label) + '</h4><div class="dash-budget-grid">';
+
+    budget.filter(function(cat) { return cat.scope === scope; }).forEach(function(cat) {
+      var pct = cat.allocated > 0 ? Math.round(cat.paid / cat.allocated * 100) : 0;
+      html += '<div class="dash-budget-item">' +
+        '<div class="dash-budget-item__header">' +
+          '<span>' + escapeHtml(cat.category) + '</span>' +
+          '<span class="muted">' + formatCurrency(cat.allocated) + '</span>' +
+        '</div>' +
+        '<div style="height:8px;background:var(--rule-2);border-radius:4px;overflow:hidden;margin-bottom:0.6rem;">' +
+          '<div style="height:100%;width:' + pct + '%;background:var(--fern);border-radius:4px;transition:width 0.3s;"></div>' +
+        '</div>' +
+        '<div class="dash-budget-item__detail">' +
+          '<span>Paid ' + formatCurrency(cat.paid) + '</span>' +
+          (cat.outstanding > 0
+            ? '<span style="color:var(--warn);">Owe ' + formatCurrency(cat.outstanding) + '</span>'
+            : '<span style="color:var(--sage);">Complete</span>') +
+        '</div>' +
+      '</div>';
+    });
+
+    html += '</div>';
   });
 
-  html += '</div></article>';
+  html += '</article>';
   return html;
 }
 </script>

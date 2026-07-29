@@ -70,26 +70,38 @@ function getDashboardData(params) {
   invoices.forEach(function(inv) { filteredInvoiceIds[normalizeId(inv.invoice_id)] = true; });
 
   var allocatedInvIds = {};
-  var allocByCategory = {};
+  var allocByKey = {};
   allocations.forEach(function(a) {
     if (!filteredInvoiceIds[normalizeId(a.invoice_id)]) return;
     allocatedInvIds[normalizeId(a.invoice_id)] = true;
-    var cat = a.category;
-    if (!allocByCategory[cat]) allocByCategory[cat] = { allocated: 0, paid: 0, outstanding: 0 };
+    var key = resolveCategoryKey(a);
+    if (!key) return;
+    if (!allocByKey[key]) allocByKey[key] = { allocated: 0, paid: 0, outstanding: 0 };
     var amount = Number(a.amount) || 0;
-    var isPaid = a.status === 'paid' || a.status === 'transferred' || a.status === 'reconciled';
-    allocByCategory[cat].allocated += amount;
-    if (isPaid) allocByCategory[cat].paid += amount;
-    else allocByCategory[cat].outstanding += amount;
+    var isPaid = normaliseAllocationStatus(a.status) === 'paid';
+    allocByKey[key].allocated += amount;
+    if (isPaid) allocByKey[key].paid += amount;
+    else allocByKey[key].outstanding += amount;
   });
 
   invoices.forEach(function(inv) {
     inv.allocated = !!allocatedInvIds[normalizeId(inv.invoice_id)];
   });
 
-  var budget = BUDGET_CATEGORIES.map(function(cat) {
-    var d = allocByCategory[cat] || { allocated: 0, paid: 0, outstanding: 0 };
-    return { category: cat, allocated: d.allocated, paid: d.paid, outstanding: d.outstanding };
+  // Owner Pay is a transfer between your own accounts, not a bucket of money —
+  // including it would double-count every personal dollar.
+  var budget = allCategoryDefs().filter(function(def) {
+    return !def.isTransfer;
+  }).map(function(def) {
+    var d = allocByKey[def.key] || { allocated: 0, paid: 0, outstanding: 0 };
+    return {
+      category: def.label,
+      key: def.key,
+      scope: def.scope,
+      allocated: d.allocated,
+      paid: d.paid,
+      outstanding: d.outstanding
+    };
   }).filter(function(c) { return c.allocated > 0; });
 
   var latestByAccount = {};

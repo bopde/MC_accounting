@@ -12,9 +12,11 @@ function bootstrap() {
     workCodes: [],
     accounts: [],
     budgetRules: [],
+    budgetCategories: null,
     contracts: [],
     myDetails: {}
   };
+  try { result.budgetCategories = getBudgetCategories(); } catch (e) {}
   try { result.businesses = getActive('Businesses'); } catch (e) {}
   try { result.workCodes = getActive('WorkCodes'); } catch (e) {}
   try { result.accounts = getActive('Accounts'); } catch (e) {}
@@ -95,6 +97,9 @@ function addAccount(data) {
 // --- Budget Rules ---
 
 function addBudgetRule(data) {
+  // New rules are company rules unless told otherwise; only pre-existing rows
+  // with a blank model column are treated as sole-trader.
+  if (!data.model) data.model = MODEL_COMPANY;
   validateBudgetRule(data);
   data.active = true;
 
@@ -115,6 +120,9 @@ function updateBudgetRule(data) {
   var rule = findById('BudgetRules', data.rule_id);
   if (!rule) throw new Error('Budget rule not found: ' + data.rule_id);
 
+  // The stored model wins — an edit must never silently reinterpret a rule's
+  // percentages against a different cascade.
+  data.model = ruleModel(rule);
   validateBudgetRule(data);
 
   if (data.is_default) {
@@ -128,14 +136,10 @@ function updateBudgetRule(data) {
   }
 
   rule.name = data.name;
-  rule.tax_withheld_pct = data.tax_withheld_pct;
-  rule.tax_to_pay_pct = data.tax_to_pay_pct;
-  rule.acc_withheld_pct = data.acc_withheld_pct;
-  rule.acc_to_pay_pct = data.acc_to_pay_pct;
-  rule.donate_pct = data.donate_pct;
-  rule.save_pct = data.save_pct;
-  rule.invest_pct = data.invest_pct;
-  rule.spend_pct = data.spend_pct;
+  rule.model = data.model;
+  pctFieldsForModel(data.model).forEach(function(field) {
+    if (data[field] !== undefined) rule[field] = data[field];
+  });
   rule.is_default = data.is_default;
   rule.notes = data.notes;
   updateRow('BudgetRules', rule._rowIndex, rule);
