@@ -57,6 +57,10 @@ Object.assign(srv, {
     var match = s.match(/^(\d{4}-\d{2}-\d{2})/);
     return match ? match[1] : '';
   },
+  idsMatch: function(a, b) {
+    var x = String(a), y = String(b);
+    return x === y || (x.replace(/^0+/, '') === y.replace(/^0+/, '') && x !== '' && y !== '');
+  },
   getAll: function(n) { return n === 'Invoices' ? invoices.slice() : []; },
   findById: function(n, id) {
     if (n !== 'Businesses') return null;
@@ -108,10 +112,15 @@ function throws(fn, fragment) {
 }
 
 function prefixOf(id) { return srv.businessInvoicePrefix(businesses.find(function(b) { return b.business_id === id; })); }
+/** Issue an invoice and record it the way the sheet would. */
 function issue(businessId, dateTo) {
   const id = srv.generateInvoiceId(dateTo, businessId);
-  invoices.push({ invoice_id: id });
+  invoices.push({ invoice_id: id, business_id: businessId, date_to: dateTo });
   return id;
+}
+/** A row already on the sheet, for the pre-existing-data cases. */
+function existing(id, businessId, dateTo) {
+  return { invoice_id: id, business_id: businessId || '', date_to: dateTo || '' };
 }
 
 console.log('\nPrefix derivation');
@@ -158,11 +167,30 @@ check('no business falls back to bare MMYY, ignoring prefixed ids', function() {
 check('all-initials names still work', function() {
   eq(srv.businessInvoicePrefix({ name: 'H & M' }), 'HM');
   eq(srv.businessInvoicePrefix({ name: 'A1 Plumbing' }), 'AP');
-  eq(srv.businessInvoicePrefix({ name: '3M' }), '3M');
+});
+
+console.log('\nPrefixes never start with a digit');
+// normalizeId strips leading zeros from every id it compares, so '0S0526' and
+// 'S0526' would alias each other and findById could return the wrong invoice.
+check('a leading digit is dropped', function() {
+  eq(srv.businessInvoicePrefix({ name: '007 Security Ltd' }), 'S', '007 Security');
+  eq(srv.businessInvoicePrefix({ name: '0800 Plumbing' }), 'P', '0800 Plumbing');
+  eq(srv.businessInvoicePrefix({ name: '3M' }), 'M', '3M');
+  eq(srv.businessInvoicePrefix({ invoice_code: '0AT' }), 'AT', 'explicit code');
+});
+check('an all-digit code yields no prefix rather than an ambiguous id', function() {
+  eq(srv.businessInvoicePrefix({ invoice_code: '0' }), '');
+  eq(srv.businessInvoicePrefix({ invoice_code: '24' }), '');
+});
+check('generated ids therefore never begin with a digit', function() {
+  invoices = [];
+  const id = srv.generateInvoiceId('2026-05-31', 'BIZ-007X');
+  eq(/^[0-9]/.test(id) === false || id === '0526', true,
+    'either letter-led or the deliberate prefix-less fallback, got ' + id);
 });
 
 console.log('\nExisting prefix-less IDs');
-invoices = [{ invoice_id: '0526' }, { invoice_id: '0526a' }];
+invoices = [existing('0526'), existing('0526a')];
 check('a prefixed id is unaffected by existing bare ids', function() {
   eq(srv.generateInvoiceId('2026-05-31', 'BIZ-001'), 'AT0526');
 });
@@ -170,11 +198,12 @@ check('a prefix-less id continues the old sequence', function() {
   eq(srv.generateInvoiceId('2026-05-31'), '0526b');
 });
 check('a leading zero stripped by Sheets is still matched', function() {
-  invoices = [{ invoice_id: 526 }];
+  invoices = [existing(526)];
   eq(srv.generateInvoiceId('2026-05-31'), '0526a', 'numeric 526 counts as 0526');
 });
 check('a prefix is not confused with another business', function() {
-  invoices = [{ invoice_id: 'AT0526' }, { invoice_id: 'ATC0526' }];
+  invoices = [existing('AT0526', 'BIZ-001', '2026-05-31'),
+    existing('ATC0526', 'BIZ-006', '2026-05-31')];
   // 'AT' must not match 'ATC0526', or Air Traffic's invoice would bump
   // Auckland Transport's sequence.
   eq(srv.generateInvoiceId('2026-05-31', 'BIZ-001'), 'AT0526a');
@@ -205,10 +234,47 @@ check('z rolls over to aa, and stays there', function() {
   eq(srv.nextSuffix('zz'), 'aaa');
 });
 check('a month past z keeps advancing', function() {
-  invoices = [{ invoice_id: 'AT0526' }, { invoice_id: 'AT0526z' }];
+  invoices = [existing('AT0526', 'BIZ-001', '2026-05-31'),
+    existing('AT0526z', 'BIZ-001', '2026-05-31')];
   eq(srv.generateInvoiceId('2026-05-31', 'BIZ-001'), 'AT0526aa');
-  invoices.push({ invoice_id: 'AT0526aa' });
+  invoices.push(existing('AT0526aa', 'BIZ-001', '2026-05-31'));
   eq(srv.generateInvoiceId('2026-05-31', 'BIZ-001'), 'AT0526ab');
+});
+
+console.log('\nSequencing survives renames and shared prefixes');
+check('a rename does not restart the sequence', function() {
+  // Numbering counts this business's invoices for the month, so changing the
+  // name (and therefore the prefix) cannot produce a second unsuffixed invoice.
+  invoices = [existing('AC0526', 'BIZ-003', '2026-05-31'),
+    existing('AC0526a', 'BIZ-003', '2026-05-20')];
+  businesses.find(function(b) { return b.business_id === 'BIZ-003'; }).name = 'Acme Digital';
+  const id = srv.generateInvoiceId('2026-05-31', 'BIZ-003');
+  eq(id.slice(0, 2), 'AD', 'new prefix');
+  eq(id === 'AD0526', false, 'not a second unsuffixed invoice for the month');
+  businesses.find(function(b) { return b.business_id === 'BIZ-003'; }).name = 'Acme';
+});
+check('a retired number is never reused', function() {
+  // a..y were used and deleted; z remains. The next id must go past z, not
+  // refill the hole — a client's records may still refer to those numbers.
+  invoices = [existing('AT0526', 'BIZ-001', '2026-05-31'),
+    existing('AT0526z', 'BIZ-001', '2026-05-30')];
+  eq(srv.generateInvoiceId('2026-05-31', 'BIZ-001'), 'AT0526aa');
+});
+check('suffix positions compare as numbers, not strings', function() {
+  eq(srv.suffixIndex(''), 0);
+  eq(srv.suffixIndex('a'), 1);
+  eq(srv.suffixIndex('z'), 26);
+  eq(srv.suffixIndex('aa'), 27);
+  eq(srv.suffixIndex('zz'), 702);
+  eq(srv.suffixIndex('aaa'), 703);
+});
+check('an id already on the sheet is never duplicated', function() {
+  // Hand-edited row occupying the slot the count would land on.
+  invoices = [existing('AT0526', 'BIZ-001', '2026-05-31'),
+    existing('AT0526a', 'BIZ-999', '2026-05-31')];
+  const id = srv.generateInvoiceId('2026-05-31', 'BIZ-001');
+  eq(id === 'AT0526a', false, 'skipped the taken id');
+  eq(id, 'AT0526b');
 });
 
 console.log('\nParsing and ordering (client)');
@@ -231,6 +297,25 @@ check('a numeric prefix still parses', function() {
 check('unrecognised shapes return null', function() {
   eq(cli.parseInvoiceId(''), null);
   eq(cli.parseInvoiceId('not-an-id'), null);
+});
+check('an upper-case suffix parses, matching the server scan', function() {
+  // generateInvoiceId scans case-insensitively, so the client must not treat
+  // the same id as unparsable and fall back to a lexical compare.
+  const p = cli.parseInvoiceId('AT0526A');
+  eq(!!p, true, 'parsed');
+  eq(p.suffix, 'a', 'normalised to lower case');
+});
+check('the comparator stays transitive with an unparsable id present', function() {
+  const odd = 'AT0526-x';
+  const ids = [odd, 'AT0625', 'AT0526'];
+  // Every permutation must produce the same order, which an intransitive
+  // comparator cannot manage.
+  const orders = new Set();
+  [[0,1,2],[0,2,1],[1,0,2],[1,2,0],[2,0,1],[2,1,0]].forEach(function(perm) {
+    orders.add(perm.map(function(i) { return ids[i]; }).sort(cli.sortInvoiceIds).join(','));
+  });
+  eq(orders.size, 1, 'one stable order across permutations, got ' + Array.from(orders).join(' | '));
+  eq(Array.from(orders)[0].indexOf(odd) > 0, true, 'unparsable ids sort last');
 });
 check('ordering is chronological, not numeric', function() {
   // The old numeric sort put June 2025 (0625) after May 2026 (0526).

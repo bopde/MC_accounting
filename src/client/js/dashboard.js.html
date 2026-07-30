@@ -426,11 +426,10 @@ function dashContracts(contracts) {
 /**
  * Budget summary for the dashboard: revenue, obligations, personal allocations.
  *
- * The bucket groupings come from the Budget page's own constants
- * (BIZ_OBLIGATIONS, PERSONAL_OBLIGATIONS, PERSONAL_ALLOCATIONS in
- * budget.js.html) — every client file is inlined into one page, so they are
- * shared globals. Duplicating the key lists here is how the two screens would
- * drift apart.
+ * The bucket groupings (BIZ_OBLIGATIONS, PERSONAL_OBLIGATIONS,
+ * PERSONAL_ALLOCATIONS) are shared globals declared in utils.js.html, which the
+ * page includes first. Duplicating the key lists here is how the two screens
+ * would drift apart.
  */
 function dashBudget(budget) {
   var by = {};
@@ -486,19 +485,19 @@ function dashBudget(budget) {
         detail: 'tax, ACC · paid ' + formatCurrency(perOwed.paid) }
     ]);
 
-  // Spend, save, invest, donate — in the order the user reads them.
-  var DASH_ALLOCATION_ORDER = ['Spend', 'Save', 'Invest', 'Donate'];
-  var allocationBoxes = DASH_ALLOCATION_ORDER.map(function(label) {
-    var row = PERSONAL_ALLOCATIONS.find(function(r) { return r.label === label; });
-    var figures = row ? sum(row.keys) : { allocated: 0, outstanding: 0, paid: 0 };
-    return {
-      label: label,
-      amount: figures.allocated,
-      detail: figures.outstanding > 0
-        ? formatCurrency(figures.outstanding) + ' still to action'
-        : 'all actioned'
-    };
-  });
+  // Spend, save, invest, donate — the order asked for, keyed on the registry key
+  // rather than the display label so renaming a label cannot silently zero a box.
+  var DASH_ALLOCATION_ORDER = ['per_spend', 'per_save', 'per_invest', 'per_donate'];
+  var allocationBoxes = DASH_ALLOCATION_ORDER.map(function(key) {
+    var row = PERSONAL_ALLOCATIONS.find(function(r) { return r.keys[0] === key; });
+    if (!row) return null;
+    var figures = sum(row.keys);
+    var detail;
+    if (figures.allocated === 0) detail = 'nothing allocated yet';
+    else if (figures.outstanding > 0) detail = formatCurrency(figures.outstanding) + ' still to action';
+    else detail = 'all actioned';
+    return { label: row.label, amount: figures.allocated, detail: detail };
+  }).filter(Boolean);
   html += dashBudgetGroup('Personal allocations', '', allocationBoxes);
 
   html += '</article>';

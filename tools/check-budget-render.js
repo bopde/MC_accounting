@@ -182,7 +182,8 @@ check('business revenue is everything invoiced (5750), got ' + tiles[0], tiles[0
 check('personal revenue is draw + sole trader (4050), got ' + tiles[1], tiles[1] === 4050);
 check('the two views are not summed into a header total',
   !/Revenue <span class="section-total">/.test(html));
-check('the overlap is spelled out', /These overlap and are not added together/.test(html));
+check('the overlap is spelled out', /overlap and are not added together/.test(html));
+check('the allocated-only caveat is stated', /allocated<\/strong> invoices only/.test(html));
 check('the overlap note names the draw amount', html.indexOf('$3,050.00 owner pay draw') !== -1);
 check('sub-figures name owner pay and sole trader separately',
   html.indexOf('owner pay $3,050.00') !== -1 && html.indexOf('sole trader $1,000.00') !== -1);

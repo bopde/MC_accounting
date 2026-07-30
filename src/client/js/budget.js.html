@@ -271,13 +271,16 @@ function renderRevenueSection(summary, cats) {
     '<h3 class="flow-group__title">Revenue' +
       ' <span class="muted small">two views of the same money</span></h3>' +
     '<div class="pot-grid">' +
-      bigTile('Business revenue', view.business.total, 'invoiced by the company · incl. GST') +
+      bigTile('Business revenue', view.business.total,
+        view.business.count + ' allocation' + (view.business.count === 1 ? '' : 's') + ' · incl. GST') +
       bigTile('Personal revenue', view.personal.total,
         'owner pay ' + formatCurrency(view.draw.allocated) +
         ' · sole trader ' + formatCurrency(view.soleTrader.total)) +
     '</div>' +
     '<p class="muted small" style="margin:-0.75rem 0 0;">' +
-      'These overlap and are not added together: the ' + formatCurrency(view.draw.allocated) +
+      'Counts <strong>allocated</strong> invoices only — a paid invoice you have not ' +
+      'allocated yet is not in these figures. ' +
+      'The two overlap and are not added together: the ' + formatCurrency(view.draw.allocated) +
       ' owner pay draw is business revenue the company then paid to you. ' +
       'Personal revenue is before personal tax, ACC and allocations.' +
     '</p>' +
@@ -462,7 +465,10 @@ function renderCategoryBlock(cat) {
  * shape fall back to a plain string compare.
  */
 function parseInvoiceId(value) {
-  var m = /^([A-Za-z0-9]*?)(\d{3,4})([a-z]*)$/.exec(String(value == null ? '' : value).trim());
+  // Suffix matched case-insensitively: generateInvoiceId scans with /i, so the
+  // server happily continues a sequence from 'AT0526A' and the client must not
+  // then treat that same id as unparsable.
+  var m = /^([A-Za-z0-9]*?)(\d{3,4})([a-zA-Z]*)$/.exec(String(value == null ? '' : value).trim());
   if (!m) return null;
   // Three digits means Sheets coerced a bare '0526' to the number 526.
   var digits = m[2].length === 3 ? '0' + m[2] : m[2];
@@ -470,14 +476,23 @@ function parseInvoiceId(value) {
     prefix: m[1].toUpperCase(),
     month: digits.slice(0, 2),
     year: digits.slice(2),
-    suffix: m[3]
+    suffix: m[3].toLowerCase()
   };
 }
 
 function sortInvoiceIds(a, b) {
   var sa = String(a), sb = String(b);
   var pa = parseInvoiceId(sa), pb = parseInvoiceId(sb);
-  if (!pa || !pb) return sa.localeCompare(sb);
+
+  // Anything unparsable (a hand-edited id) sorts last as its own block. Falling
+  // back to a string compare only when ONE side failed made the comparator
+  // intransitive — mixing a chronological order with a lexical one can produce
+  // a < b < c < a, and Array.sort then depends on input order.
+  if (!pa || !pb) {
+    if (pa) return -1;
+    if (pb) return 1;
+    return sa.localeCompare(sb);
+  }
 
   if (pa.year !== pb.year) return pa.year < pb.year ? -1 : 1;
   if (pa.month !== pb.month) return pa.month < pb.month ? -1 : 1;

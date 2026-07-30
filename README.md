@@ -39,7 +39,9 @@ A finance management web app built entirely on Google Apps Script with Google Sh
 **Invoice numbers** are `<business code><MMYY>` — Auckland Transport for May 2026 is `AT0526`. Further invoices for the same client in the same month get a letter suffix: `AT0526a`, `AT0526b`. Numbering is per client per month, so two clients invoiced in May both start unsuffixed.
 
 1. The code defaults to the initials of the business name, skipping connectives and legal suffixes: `Auckland Transport` -> `AT`, `Ministry of Business and Employment` -> `MBE`, `Beta Corp Limited` -> `BC`. A single-word name takes its first two letters: `Acme` -> `AC`.
-1. Set an explicit **invoice code** on the business in Settings to override it — needed when the initials read badly, or when two clients would otherwise share a prefix and you could not tell their invoices apart.
+1. Set an explicit **invoice code** on the business in Settings to override it — needed when the initials read badly. Saving a business whose code would clash with another one is **refused**, naming the client it clashes with: two clients sharing a prefix share one sequence, so each ends up with a run full of holes.
+1. A code never starts with a digit. `normalizeId` strips leading zeros from every id it compares, so a prefix beginning `0` would make `0S0526` and `S0526` alias each other and `findById` could return the wrong invoice.
+1. Numbering counts a client's invoices **for that month**, not matching id text, so renaming a business cannot restart its sequence and produce a second unsuffixed invoice. A number that has been used is never reissued, even if the invoice was deleted — a client's records may still refer to it.
 1. Invoices raised before this format existed keep their bare `MMYY` ids, and their sequence continues independently.
 
 ### 3. Budget Allocations
@@ -359,7 +361,7 @@ For expenses: switch to the **Expenses** tab, select business and work code, ent
 
 Four sections, each a row of boxes in two columns, reading top to bottom as what came in → what is owed → what is left → how it is split:
 
-1. **Revenue** — two views of the same money, deliberately **not** added together:
+1. **Revenue** — two views of the same money, deliberately **not** added together. Both count **allocated** invoices only, so a paid invoice you have not allocated yet is absent:
    1. a. **Business revenue** — everything the company invoiced, including GST.
    1. b. **Personal revenue** — what actually reached you: the owner pay draw plus sole-trader income, before personal tax, ACC and allocations.
    1. c. They overlap by the owner pay draw — business revenue the company then paid to you — so there is no combined total, and the section says so rather than leaving you to work out why the boxes do not sum.

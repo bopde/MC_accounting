@@ -403,9 +403,24 @@ var INVOICE_PREFIX_STOPWORDS = ['of', 'the', 'and', 'a', 'an', 'for', 'at',
   'ltd', 'limited', 'inc', 'incorporated', 'llc', 'llp', 'plc', 'pty', 'co', 'nz'];
 
 var INVOICE_PREFIX_MAX = 3;
+var INVOICE_CODE_MAX = 6;
 
+/**
+ * Clean a prefix to the characters an invoice id may safely carry.
+ *
+ * Leading digits are dropped, which is not cosmetic: normalizeId() strips
+ * leading zeros from every id it compares (Sheets turns a bare '0526' into the
+ * number 526), so a prefix beginning with 0 makes ids alias each other —
+ * '0S0526' and 'S0526' both normalise to 'S0526', and '00526' collides with a
+ * legacy '0526'. findById would then return the wrong invoice, and voiding or
+ * allocating would hit the wrong record. Requiring a letter first removes the
+ * whole class.
+ */
 function normaliseInvoicePrefix(value) {
-  return String(value == null ? '' : value).toUpperCase().replace(/[^A-Z0-9]/g, '');
+  return String(value == null ? '' : value)
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, '')
+    .replace(/^[0-9]+/, '');
 }
 
 /**
@@ -414,7 +429,8 @@ function normaliseInvoicePrefix(value) {
  * An explicit invoice_code on the business always wins — needed when the
  * initials read badly, or when two clients would otherwise share a prefix.
  * Otherwise: one letter per significant word, or the first two letters when the
- * name is a single word, capped at three characters.
+ * name is a single word, capped at INVOICE_PREFIX_MAX characters. An explicit
+ * code may run to INVOICE_CODE_MAX.
  *
  * Returns '' when there is no usable name, which falls back to the old
  * prefix-less MMYY id rather than failing the invoice.
@@ -423,7 +439,7 @@ function businessInvoicePrefix(business) {
   if (!business) return '';
 
   var explicit = normaliseInvoicePrefix(business.invoice_code);
-  if (explicit) return explicit.slice(0, 6);
+  if (explicit) return explicit.slice(0, INVOICE_CODE_MAX);
 
   var words = String(business.name || '').split(/[^A-Za-z0-9]+/).filter(Boolean);
   if (words.length === 0) return '';
@@ -481,32 +497,73 @@ function generateInvoiceId(dateTo, businessId) {
     var prefix = businessInvoicePrefix(business);
     var stem = prefix + base;
 
-    // Tolerate a stripped leading zero: Sheets stores a bare '0526' as the
-    // number 526. A prefixed id is text so it keeps its zero, but the same
-    // pattern serves both cases.
-    var baseNum = base.replace(/^0+/, '');
-    var pattern = new RegExp('^' + prefix + '0*' + baseNum + '([a-z]*)$', 'i');
+    var invoices = getAll('Invoices');
 
-    var maxSuffix = '';
-    var count = 0;
-    getAll('Invoices').forEach(function(inv) {
-      var m = pattern.exec(String(inv.invoice_id));
-      if (!m) return;
-      count++;
-      // Compare by length first: plain '>' puts 'aa' below 'z', so once a
-      // month reached suffix 'z' every later invoice reused 'aa'.
-      var suffix = m[1].toLowerCase();
-      if (suffix.length > maxSuffix.length ||
-          (suffix.length === maxSuffix.length && suffix > maxSuffix)) {
-        maxSuffix = suffix;
-      }
+    // Count prior invoices by BUSINESS AND MONTH, not by matching the id text.
+    // Matching text meant a renamed business restarted its sequence — "Acme"
+    // (AC0526) becoming "Acme Digital" produced a second unsuffixed invoice for
+    // the same client and month — and two clients sharing a prefix interleaved
+    // one sequence, giving each of them a gappy run.
+    //
+    // With no business we cannot scope it, so fall back to matching the bare
+    // MMYY text, which is what every pre-prefix invoice used. Only there is the
+    // stripped-leading-zero tolerance needed: Sheets stores '0526' as 526.
+    var priorCount;
+    if (businessId) {
+      priorCount = invoices.filter(function(inv) {
+        if (!idsMatch(inv.business_id, businessId)) return false;
+        var d = dateOnly(inv.date_to || inv.created_date);
+        return d.slice(0, 4) === parts[0] && d.slice(5, 7) === mm;
+      }).length;
+    } else {
+      var baseNum = base.replace(/^0+/, '');
+      var barePattern = new RegExp('^0*' + baseNum + '([a-z]*)$', 'i');
+      priorCount = invoices.filter(function(inv) {
+        return barePattern.test(String(inv.invoice_id));
+      }).length;
+    }
+
+    var taken = {};
+    var highest = '';
+    invoices.forEach(function(inv) {
+      var id = String(inv.invoice_id).trim();
+      taken[id.toUpperCase()] = true;
+
+      // Highest suffix already issued under THIS stem. A number that has been
+      // used must never be reused, even if the invoice was later deleted — a
+      // client's records may still refer to it. So the sequence only ever moves
+      // forward, never fills a hole.
+      if (id.toUpperCase().indexOf(stem.toUpperCase()) !== 0) return;
+      var tail = id.slice(stem.length).toLowerCase();
+      if (!/^[a-z]*$/.test(tail)) return;
+      if (suffixIndex(tail) > suffixIndex(highest)) highest = tail;
     });
 
-    if (count === 0) return stem;
+    // Position by count so a rename or a shared prefix cannot restart the
+    // sequence, but never at or below a suffix already used under this stem.
+    var start = priorCount === 0 ? 0 : Math.max(priorCount, suffixIndex(highest) + 1);
 
-    // Next suffix after the highest existing one
-    return stem + (maxSuffix === '' ? 'a' : nextSuffix(maxSuffix));
+    var suffix = '';
+    while (suffixIndex(suffix) < start || taken[(stem + suffix).toUpperCase()]) {
+      suffix = suffix === '' ? 'a' : nextSuffix(suffix);
+    }
+
+    return stem + suffix;
   });
+}
+
+/**
+ * Position of a suffix in the sequence: '' -> 0, a -> 1, z -> 26, aa -> 27.
+ * Bijective base-26, so suffixes compare as numbers rather than as strings —
+ * plain '>' puts 'aa' below 'z'.
+ */
+function suffixIndex(suffix) {
+  var n = 0;
+  var s = String(suffix || '');
+  for (var i = 0; i < s.length; i++) {
+    n = n * 26 + (s.charCodeAt(i) - 96);
+  }
+  return n;
 }
 
 function nextSuffix(s) {

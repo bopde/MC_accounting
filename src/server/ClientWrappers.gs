@@ -53,33 +53,41 @@ function updateAllocationStatusFromClient(params) {
  * Toggle active status of a reference entity (Business, WorkCode, Account).
  * @param {string} params - "sheetName|rowIndex|active"
  */
+/**
+ * Activate or deactivate a reference entity, addressed by its ID.
+ *
+ * @param {string} params - "sheetName|entityId|active"
+ *
+ * Addressed by ID, not by row index: the row index the client renders with is a
+ * snapshot, so inserting or deleting a row in the spreadsheet afterwards made
+ * Deactivate silently hit whichever record had moved into that position. The row
+ * is re-resolved here, under the lock, every time.
+ */
 function toggleEntityFromClient(params) {
   var ALLOWED = ['Businesses', 'WorkCodes', 'Accounts', 'BudgetRules'];
-  var parts = params.split('|');
+  var parts = String(params).split('|');
   var sheetName = parts[0];
-  var rowIndex = parseInt(parts[1], 10);
+  var entityId = parts[1];
   var active = parts[2] === 'true';
 
   if (ALLOWED.indexOf(sheetName) === -1) {
     throw new Error('Access denied: cannot toggle ' + sheetName);
   }
+  if (!entityId) throw new Error('Missing entity id');
 
-  if (isNaN(rowIndex) || rowIndex < 2) {
-    throw new Error('Invalid row index');
-  }
+  return withScriptLock(function() {
+    var entity = findById(sheetName, entityId);
+    if (!entity) throw new Error('Not found in ' + sheetName + ': ' + entityId);
 
-  var ss = getSpreadsheet();
-  var sheet = ss.getSheetByName(sheetName);
-  var headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
-  var row = sheet.getRange(rowIndex, 1, 1, headers.length).getValues()[0];
+    if (!Object.prototype.hasOwnProperty.call(entity, 'active')) {
+      throw new Error('No active column in ' + sheetName +
+        '. Run setupSheets() from the Apps Script editor to add it.');
+    }
 
-  // Find the 'active' column
-  var activeCol = headers.indexOf('active');
-  if (activeCol === -1) throw new Error('No active column in ' + sheetName);
-
-  row[activeCol] = active;
-  sheet.getRange(rowIndex, 1, 1, row.length).setValues([row]);
-  return { success: true };
+    entity.active = active;
+    updateRow(sheetName, entity._rowIndex, entity);
+    return { success: true };
+  });
 }
 
 /**

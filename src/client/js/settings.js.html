@@ -144,8 +144,8 @@ function renderBusinessSettings() {
           '<td class="actions">' +
             '<button type="button" class="btn-small btn-subtle" onclick="editBusiness(\'' + jsAttr(b.business_id) + '\')">Edit</button> ' +
             (isActive
-              ? '<button type="button" class="btn-small btn-subtle" onclick="toggleBusiness(' + b._rowIndex + ', false)">Deactivate</button>'
-              : '<button type="button" class="btn-small" onclick="toggleBusiness(' + b._rowIndex + ', true)">Activate</button>') +
+              ? '<button type="button" class="btn-small btn-subtle" onclick="toggleBusiness(\'' + jsAttr(b.business_id) + '\', false)">Deactivate</button>'
+              : '<button type="button" class="btn-small" onclick="toggleBusiness(\'' + jsAttr(b.business_id) + '\', true)">Activate</button>') +
           '</td>' +
           '</tr>';
       });
@@ -246,8 +246,8 @@ function submitBusiness(event) {
   });
 }
 
-function toggleBusiness(rowIndex, active) {
-  serverCall('toggleEntityFromClient', 'Businesses|' + rowIndex + '|' + active).then(function() {
+function toggleBusiness(bizId, active) {
+  serverCall('toggleEntityFromClient', 'Businesses|' + bizId + '|' + active).then(function() {
     showToast(active ? 'Business activated!' : 'Business deactivated!');
     loadReferenceData();
     renderBusinessSettings();
@@ -302,8 +302,8 @@ function renderCodeSettings() {
           '<td class="actions">' +
             '<button type="button" class="btn-small btn-subtle" onclick="editWorkCode(\'' + jsAttr(c.code_id) + '\')">Edit</button> ' +
             (isActive
-              ? '<button type="button" class="btn-small btn-subtle" onclick="toggleCode(' + c._rowIndex + ', false)">Deactivate</button>'
-              : '<button type="button" class="btn-small" onclick="toggleCode(' + c._rowIndex + ', true)">Activate</button>') +
+              ? '<button type="button" class="btn-small btn-subtle" onclick="toggleCode(\'' + jsAttr(c.code_id) + '\', false)">Deactivate</button>'
+              : '<button type="button" class="btn-small" onclick="toggleCode(\'' + jsAttr(c.code_id) + '\', true)">Activate</button>') +
           '</td></tr>';
       });
       html += '</tbody></table>';
@@ -391,8 +391,8 @@ function submitWorkCode(event) {
   });
 }
 
-function toggleCode(rowIndex, active) {
-  serverCall('toggleEntityFromClient', 'WorkCodes|' + rowIndex + '|' + active).then(function() {
+function toggleCode(codeId, active) {
+  serverCall('toggleEntityFromClient', 'WorkCodes|' + codeId + '|' + active).then(function() {
     showToast(active ? 'Code activated!' : 'Code deactivated!');
     loadReferenceData();
     renderCodeSettings();
@@ -450,8 +450,8 @@ function renderAccountSettings() {
           '<td>' + escapeHtml(a.purpose) + '</td>' +
           '<td>' +
             (isActive
-              ? '<button type="button" class="outline secondary" onclick="toggleAccount(' + a._rowIndex + ', false)">Deactivate</button>'
-              : '<button type="button" class="outline" onclick="toggleAccount(' + a._rowIndex + ', true)">Activate</button>') +
+              ? '<button type="button" class="outline secondary" onclick="toggleAccount(\'' + jsAttr(a.account_id) + '\', false)">Deactivate</button>'
+              : '<button type="button" class="outline" onclick="toggleAccount(\'' + jsAttr(a.account_id) + '\', true)">Activate</button>') +
           '</td></tr>';
       });
       html += '</tbody></table>';
@@ -484,8 +484,8 @@ function submitAccount(event) {
   });
 }
 
-function toggleAccount(rowIndex, active) {
-  serverCall('toggleEntityFromClient', 'Accounts|' + rowIndex + '|' + active).then(function() {
+function toggleAccount(accountId, active) {
+  serverCall('toggleEntityFromClient', 'Accounts|' + accountId + '|' + active).then(function() {
     showToast(active ? 'Account activated!' : 'Account deactivated!');
     loadReferenceData();
     renderAccountSettings();
@@ -696,8 +696,8 @@ function renderRuleTable(title, rules, model) {
     html += '<td>' + (isDef ? 'Yes' : '') + '</td>' +
       '<td>' +
         (isActive
-          ? '<button type="button" class="btn-small btn-subtle" onclick="toggleBudgetRule(' + r._rowIndex + ', false)">Deactivate</button>'
-          : '<button type="button" class="btn-small" onclick="toggleBudgetRule(' + r._rowIndex + ', true)">Activate</button>') +
+          ? '<button type="button" class="btn-small btn-subtle" onclick="toggleBudgetRule(\'' + jsAttr(r.rule_id) + '\', false)">Deactivate</button>'
+          : '<button type="button" class="btn-small" onclick="toggleBudgetRule(\'' + jsAttr(r.rule_id) + '\', true)">Activate</button>') +
       '</td>' +
       '<td class="actions"><button type="button" class="btn-small btn-subtle" onclick="editBudgetRule(\'' + jsAttr(r.rule_id) + '\')">Edit</button></td></tr>';
   });
@@ -831,8 +831,8 @@ function submitBudgetRuleEdit(event) {
   });
 }
 
-function toggleBudgetRule(rowIndex, active) {
-  serverCall('toggleEntityFromClient', 'BudgetRules|' + rowIndex + '|' + active).then(function() {
+function toggleBudgetRule(ruleId, active) {
+  serverCall('toggleEntityFromClient', 'BudgetRules|' + ruleId + '|' + active).then(function() {
     showToast(active ? 'Budget rule activated!' : 'Budget rule deactivated!');
     refreshReferenceData();
     renderRuleSettings();
