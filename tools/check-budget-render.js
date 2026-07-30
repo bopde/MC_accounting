@@ -278,5 +278,38 @@ check('no undefined or NaN in the dashboard tile', !/undefined|NaN/.test(dash));
 check('dashboard reuses the Budget page groupings, not its own copies',
   typeof cli.BIZ_OBLIGATIONS !== 'undefined' && typeof cli.PERSONAL_ALLOCATIONS !== 'undefined');
 
+// --- Dashboard Hours & Earnings table ---
+
+console.log('\nDashboard hours table');
+
+const bizMap = { 'BIZ-001': { name: "Bob's Consulting", currency: 'NZD' },
+  'BIZ-002': { name: 'Beta Corp', currency: 'NZD' } };
+const dashTimeEntries = [
+  { business_id: 'BIZ-001', hours: 8, line_total: 1200 },
+  { business_id: 'BIZ-001', hours: 2, line_total: 300 }
+];
+const dashInvoices = [
+  // time_subtotal is billed time only; total and subtotal carry GST/expenses.
+  { business_id: 'BIZ-001', status: 'paid', time_subtotal: 5000, subtotal: 5200, total: 5950 },
+  { business_id: 'BIZ-001', status: 'void', time_subtotal: 9999, subtotal: 9999, total: 9999 },
+  // Invoiced this period, no hours logged in it — May's work billed in June.
+  { business_id: 'BIZ-002', status: 'sent', time_subtotal: 800, subtotal: 800, total: 920 }
+];
+const hoursHtml = cli.dashHours(dashTimeEntries, dashInvoices, bizMap);
+
+check('an Invoiced column is present', hoursHtml.indexOf('>Invoiced<') !== -1);
+check('invoiced uses billed time, not the GST-inclusive total',
+  hoursHtml.indexOf('$5,000.00') !== -1 && hoursHtml.indexOf('$5,950.00') === -1);
+check('voided invoices are excluded', hoursHtml.indexOf('9,999') === -1);
+check('a business invoiced but with no hours still gets a row',
+  hoursHtml.indexOf('Beta Corp') !== -1 && hoursHtml.indexOf('$800.00') !== -1);
+check('that row shows zero hours rather than blank', /Beta Corp<\/td>[\s\S]*?>0\.0</.test(hoursHtml));
+check('hours and earned are unchanged',
+  hoursHtml.indexOf('10.0') !== -1 && hoursHtml.indexOf('$1,500.00') !== -1);
+check('the total row totals invoiced too', /total-row[\s\S]*?\$5,800\.00/.test(hoursHtml));
+check('the caveat about expenses and GST is stated',
+  hoursHtml.indexOf('excludes expenses and GST') !== -1);
+check('no undefined or NaN in the hours table', !/undefined|NaN/.test(hoursHtml));
+
 console.log('\n' + passes + ' passed, ' + failures + ' failed');
 process.exit(failures > 0 ? 1 : 0);

@@ -37,6 +37,8 @@ function getDashboardData(params) {
       created_date: inv.created_date,
       total: Number(inv.total) || 0,
       subtotal: Number(inv.subtotal) || 0,
+      // Billed time only — ex-GST and excluding expenses.
+      time_subtotal: invoiceBilledSubtotal(inv),
       status: inv.status
     };
   });

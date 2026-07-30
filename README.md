@@ -378,6 +378,12 @@ invoiced revenue − Total obligations = Reserve + Personal pot + withheld
 Personal pot                        = Save + Donate + Invest + Spend
 ```
 
+### The Dashboard hours table
+
+**Hours & Earnings** lists, per client: hours logged, **Earned** (the value of that logged time) and **Invoiced** (billed time only — excluding expenses and GST, i.e. the invoice's `time_subtotal`). Voided invoices are excluded, and a client invoiced in the period with no hours logged in it still gets a row.
+
+Earned and Invoiced are deliberately different sets of work: Earned is time logged inside the date range, Invoiced is what was billed inside it — May's work invoiced in June appears in each of them in a different month.
+
 ### The Dashboard budget tile
 
 The same figures, condensed to three groups: **Total revenue** (business and personal, with the same overlap caveat), **Total obligations** (business and personal, outstanding only), and **Personal allocations** (spend, save, invest, donate). The bucket groupings are shared globals in `utils.js.html`, so the Dashboard and the Budget page cannot drift apart.

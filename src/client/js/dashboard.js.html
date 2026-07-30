@@ -71,7 +71,7 @@ function renderDashContent() {
   }
 
   var html = '';
-  html += dashHours(timeEntries, bizMap);
+  html += dashHours(timeEntries, invoices, bizMap);
   html += '<div id="dash-chart-area">' + dashChart(timeEntries, bizMap) + '</div>';
   html += dashContracts(contractProgress);
   if (data.budget && data.budget.length > 0) {
@@ -324,51 +324,84 @@ function dashStatusTiles(invoices) {
   return html;
 }
 
-function dashHours(timeEntries, bizMap) {
+function dashHours(timeEntries, invoices, bizMap) {
   var byBiz = {};
   var totalHrs = 0;
   var totalByCur = {};
+  var invoicedByCur = {};
+
+  function rowFor(bizId) {
+    var key = normalizeId(bizId);
+    if (!byBiz[key]) {
+      var biz = bizMap[key];
+      byBiz[key] = {
+        name: biz ? biz.name : 'Unknown',
+        currency: biz ? (biz.currency || 'NZD') : 'NZD',
+        hours: 0, earned: 0, invoiced: 0
+      };
+    }
+    return byBiz[key];
+  }
 
   timeEntries.forEach(function(te) {
-    var bizId = te.business_id;
-    var biz = bizMap[normalizeId(bizId)];
-    var name = biz ? biz.name : 'Unknown';
-    var cur = biz ? (biz.currency || 'NZD') : 'NZD';
-
-    if (!byBiz[bizId]) byBiz[bizId] = { name: name, currency: cur, hours: 0, earned: 0 };
-    byBiz[bizId].hours += te.hours;
-    byBiz[bizId].earned += te.line_total;
+    var row = rowFor(te.business_id);
+    row.hours += te.hours;
+    row.earned += te.line_total;
     totalHrs += te.hours;
-    totalByCur[cur] = (totalByCur[cur] || 0) + te.line_total;
+    totalByCur[row.currency] = (totalByCur[row.currency] || 0) + te.line_total;
+  });
+
+  // Invoiced time, ex-GST and excluding expenses. A business can be invoiced in
+  // a period with no hours logged in it — May's work billed in June — so rows
+  // are seeded from invoices too, not just from time entries.
+  (invoices || []).forEach(function(inv) {
+    if (inv.status === 'void') return;
+    var row = rowFor(inv.business_id);
+    var amount = Number(inv.time_subtotal) || 0;
+    row.invoiced += amount;
+    invoicedByCur[row.currency] = (invoicedByCur[row.currency] || 0) + amount;
   });
 
   var html = '<article><header><h3 style="margin:0;">Hours &amp; Earnings</h3></header>';
 
   var keys = Object.keys(byBiz);
   if (keys.length === 0) {
-    html += '<p class="muted">No time entries this period.</p>';
+    html += '<p class="muted">No time entries or invoices this period.</p>';
   } else {
-    html += '<table class="data-table data-table--compact"><thead><tr>' +
+    html += '<div class="scroll-x"><table class="data-table data-table--compact"><thead><tr>' +
       '<th>Business</th><th class="number">Hours</th><th class="number">Earned</th>' +
+      '<th class="number">Invoiced</th>' +
       '</tr></thead><tbody>';
     keys.forEach(function(k) {
       var b = byBiz[k];
       html += '<tr><td>' + escapeHtml(b.name) + '</td>' +
         '<td class="number">' + b.hours.toFixed(1) + '</td>' +
-        '<td class="number">' + formatCurrency(b.earned, b.currency) + '</td></tr>';
+        '<td class="number">' + formatCurrency(b.earned, b.currency) + '</td>' +
+        '<td class="number">' + formatCurrency(b.invoiced, b.currency) + '</td></tr>';
     });
+
+    var perCurrency = function(totals) {
+      var codes = Object.keys(totals);
+      if (codes.length === 0) return formatCurrency(0);
+      return codes.map(function(c) { return formatCurrency(totals[c], c); }).join(' / ');
+    };
+
     html += '<tr class="total-row"><td><strong>Total</strong></td>' +
       '<td class="number"><strong>' + totalHrs.toFixed(1) + '</strong></td>' +
-      '<td class="number"><strong>' +
-      Object.keys(totalByCur).map(function(c) { return formatCurrency(totalByCur[c], c); }).join(' / ') +
-      '</strong></td></tr>';
-    html += '</tbody></table>';
+      '<td class="number"><strong>' + perCurrency(totalByCur) + '</strong></td>' +
+      '<td class="number"><strong>' + perCurrency(invoicedByCur) + '</strong></td></tr>';
+    html += '</tbody></table></div>';
+
+    html += '<p class="muted small" style="margin:0.5rem 0 0;">' +
+      'Invoiced is billed time only — excludes expenses and GST. ' +
+      'Earned is time logged in this period, which is a different set of work to what was invoiced in it.' +
+      '</p>';
 
     if (totalHrs > 0) {
       var rateHtml = Object.keys(totalByCur).map(function(cur) {
         return formatCurrency(totalByCur[cur] / totalHrs, cur) + '/hr';
       }).join(', ');
-      html += '<p class="muted small" style="margin:0.5rem 0 0;">Avg rate: ' + rateHtml + '</p>';
+      html += '<p class="muted small" style="margin:0.25rem 0 0;">Avg rate: ' + rateHtml + '</p>';
     }
   }
 
