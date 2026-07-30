@@ -131,7 +131,7 @@ function renderBusinessSettings() {
           '<td class="number">' + formatCurrency(b.default_rate, cur) + '</td>' +
           '<td>' + escapeHtml(cur) + '</td>' +
           '<td class="actions">' +
-            '<button type="button" class="btn-small btn-subtle" onclick="editBusiness(\'' + escapeHtml(b.business_id) + '\')">Edit</button> ' +
+            '<button type="button" class="btn-small btn-subtle" onclick="editBusiness(\'' + jsAttr(b.business_id) + '\')">Edit</button> ' +
             (isActive
               ? '<button type="button" class="btn-small btn-subtle" onclick="toggleBusiness(' + b._rowIndex + ', false)">Deactivate</button>'
               : '<button type="button" class="btn-small" onclick="toggleBusiness(' + b._rowIndex + ', true)">Activate</button>') +
@@ -167,7 +167,7 @@ function editBusiness(bizId) {
     area.innerHTML =
       '<article style="margin:1rem 0;">' +
         '<header><h4>Edit: ' + escapeHtml(b.name) + '</h4></header>' +
-        '<form onsubmit="saveBusiness(event, \'' + escapeHtml(b.business_id) + '\')">' +
+        '<form onsubmit="saveBusiness(event, \'' + jsAttr(b.business_id) + '\')">' +
           '<div class="form-row">' +
             '<label>Name <input type="text" id="ebiz-name" required value="' + escapeHtml(b.name) + '"></label>' +
             '<label>Contact Name <input type="text" id="ebiz-contact" value="' + escapeHtml(b.contact_name || '') + '"></label>' +
@@ -185,7 +185,7 @@ function editBusiness(bizId) {
         '</form>' +
       '</article>';
     area.scrollIntoView({ behavior: 'smooth' });
-  });
+  }).catch(function(err) { showToast(err.message, 'error'); });
 }
 
 function saveBusiness(event, bizId) {
@@ -282,7 +282,7 @@ function renderCodeSettings() {
           '<td>' + escapeHtml(c.category) + '</td>' +
           '<td>' + (conName ? escapeHtml(conName) : '<span class="muted">—</span>') + '</td>' +
           '<td class="actions">' +
-            '<button type="button" class="btn-small btn-subtle" onclick="editWorkCode(\'' + escapeHtml(c.code_id) + '\')">Edit</button> ' +
+            '<button type="button" class="btn-small btn-subtle" onclick="editWorkCode(\'' + jsAttr(c.code_id) + '\')">Edit</button> ' +
             (isActive
               ? '<button type="button" class="btn-small btn-subtle" onclick="toggleCode(' + c._rowIndex + ', false)">Deactivate</button>'
               : '<button type="button" class="btn-small" onclick="toggleCode(' + c._rowIndex + ', true)">Activate</button>') +
@@ -322,7 +322,7 @@ function editWorkCode(codeId) {
     area.innerHTML =
       '<article style="margin:1rem 0;">' +
         '<header><h4>Edit: ' + escapeHtml(c.code_id) + '</h4></header>' +
-        '<form onsubmit="saveWorkCode(event, \'' + escapeHtml(c.code_id) + '\')">' +
+        '<form onsubmit="saveWorkCode(event, \'' + jsAttr(c.code_id) + '\')">' +
           '<div class="form-row">' +
             '<label>Description <input type="text" id="ewc-desc" required value="' + escapeHtml(c.description) + '"></label>' +
             '<label>Category <select id="ewc-cat">' + catOpts + '</select></label>' +
@@ -335,7 +335,7 @@ function editWorkCode(codeId) {
         '</form>' +
       '</article>';
     area.scrollIntoView({ behavior: 'smooth' });
-  });
+  }).catch(function(err) { showToast(err.message, 'error'); });
 }
 
 function saveWorkCode(event, codeId) {
@@ -531,6 +531,14 @@ function ruleModelExplainer(model) {
 function buildRuleFormFields(prefix, values, model) {
   var groups = RULE_FORM_GROUPS[model] || RULE_FORM_GROUPS.company;
 
+  // Without the registry there are no percentage fields to render, and the
+  // form would silently submit a rule with no percentages that then fails
+  // validation with a confusing message.
+  if (!ruleDefsForModel(model).length) {
+    return '<p class="error">Reference data has not loaded, so this form cannot be built. ' +
+      'Reload the page; if it persists, check the Apps Script Executions log.</p>';
+  }
+
   var html = '<div class="form-row">' +
     '<label>Rule Name <input type="text" id="' + prefix + '-name" required placeholder="e.g. Company Default" value="' + escapeHtml(values.name || '') + '"></label>' +
   '</div>' +
@@ -545,9 +553,18 @@ function buildRuleFormFields(prefix, values, model) {
         '</em> — ' + escapeHtml(g.hint) + '</p>' +
       '<div class="form-row">' +
       defs.map(function(d) {
-        var val = (values[d.pctField] !== undefined && values[d.pctField] !== '')
-          ? values[d.pctField]
-          : (d.defaultPct == null ? 0 : d.defaultPct);
+        // Registry defaults are for NEW rules only. Pre-filling them when an
+        // existing rule's cell is blank meant the table said 0.0%, allocations
+        // used 0%, and simply opening Edit and saving changed the rule.
+        var stored = values[d.pctField];
+        var val;
+        if (values.isExisting) {
+          val = (stored === undefined || stored === null || stored === '') ? 0 : stored;
+        } else {
+          val = (stored === undefined || stored === null || stored === '')
+            ? (d.defaultPct == null ? 0 : d.defaultPct)
+            : stored;
+        }
         return '<label>' + escapeHtml(d.label) + ' % ' +
           '<input type="number" id="' + ruleInputId(prefix, d) + '" step="0.0001" min="0" value="' + val + '" required></label>';
       }).join('') +
@@ -601,12 +618,18 @@ function renderRuleSettings() {
   content.innerHTML = '<div aria-busy="true">Loading...</div>';
 
   serverCall('getBudgetRules').then(function(rules) {
-    var html =
-      '<details class="add-form-panel"><summary>+ Add New Budget Rule</summary><div>' +
-      '<form id="add-rule-form" onsubmit="submitBudgetRule(event)">' +
-        buildRuleFormFields('br', {}, 'company') +
-        '<div class="form-actions"><button type="submit">Add Rule</button></div>' +
-      '</form></div></details>';
+    // Without the category registry there are no percentage fields to render.
+    // Offer no form at all rather than one that cannot be filled in.
+    var canEdit = ruleDefsForModel('company').length > 0;
+
+    var html = canEdit
+      ? '<details class="add-form-panel"><summary>+ Add New Budget Rule</summary><div>' +
+        '<form id="add-rule-form" onsubmit="submitBudgetRule(event)">' +
+          buildRuleFormFields('br', {}, 'company') +
+          '<div class="form-actions"><button type="submit">Add Rule</button></div>' +
+        '</form></div></details>'
+      : '<p class="error">Budget categories failed to load, so rules cannot be added or edited. ' +
+        'Reload the page; if it persists, check the Apps Script Executions log.</p>';
 
     html += '<div id="rule-edit-area"></div>';
 
@@ -621,7 +644,7 @@ function renderRuleSettings() {
     }
 
     content.innerHTML = html;
-    attachRuleSumListeners('br', 'company');
+    if (canEdit) attachRuleSumListeners('br', 'company');
   }).catch(function(err) {
     content.innerHTML = '<p>Error: ' + escapeHtml(err.message) + '</p>';
   });
@@ -658,7 +681,7 @@ function renderRuleTable(title, rules, model) {
           ? '<button type="button" class="btn-small btn-subtle" onclick="toggleBudgetRule(' + r._rowIndex + ', false)">Deactivate</button>'
           : '<button type="button" class="btn-small" onclick="toggleBudgetRule(' + r._rowIndex + ', true)">Activate</button>') +
       '</td>' +
-      '<td class="actions"><button type="button" class="btn-small btn-subtle" onclick="editBudgetRule(\'' + escapeHtml(r.rule_id) + '\')">Edit</button></td></tr>';
+      '<td class="actions"><button type="button" class="btn-small btn-subtle" onclick="editBudgetRule(\'' + jsAttr(r.rule_id) + '\')">Edit</button></td></tr>';
   });
 
   html += '</tbody></table></div>';
@@ -666,14 +689,34 @@ function renderRuleTable(title, rules, model) {
 }
 
 function editBudgetRule(ruleId) {
-  var rule = (AppCache.budgetRules || []).find(function(r) { return r.rule_id === ruleId; });
-  if (!rule) { showToast('Rule not found in cache', 'error'); return; }
+  // The table is rendered from the unfiltered getBudgetRules, but the cache
+  // holds active rules only — so a deactivated rule showed an Edit button that
+  // always failed. Fetch fresh when the cache does not have it.
+  var cached = (AppCache.budgetRules || []).find(function(r) { return idsMatch(r.rule_id, ruleId); });
+  if (cached) {
+    openRuleEditor(cached, ruleId);
+    return;
+  }
 
+  serverCall('getBudgetRules').then(function(rules) {
+    var rule = (rules || []).find(function(r) { return idsMatch(r.rule_id, ruleId); });
+    if (!rule) { showToast('Rule not found: ' + ruleId, 'error'); return; }
+    openRuleEditor(rule, ruleId);
+  }).catch(function(err) { showToast(err.message, 'error'); });
+}
+
+function openRuleEditor(rule, ruleId) {
   _editingRuleId = ruleId;
   var model = ruleModelOf(rule);
   var area = document.getElementById('rule-edit-area');
+  if (!area) return;
 
-  var values = { name: rule.name, notes: rule.notes, is_default: isFlagTrue(rule.is_default) };
+  var values = {
+    name: rule.name,
+    notes: rule.notes,
+    is_default: isFlagTrue(rule.is_default),
+    isExisting: true
+  };
   ruleDefsForModel(model).forEach(function(d) { values[d.pctField] = rule[d.pctField]; });
 
   area.innerHTML =
@@ -743,7 +786,11 @@ function submitBudgetRule(event) {
 
   serverCall('addBudgetRule', data).then(function() {
     showToast('Budget rule added!');
-    refreshReferenceData();
+    // Await the cache refresh before re-rendering: otherwise the table can
+    // paint the new rule before the cache holds it, and clicking Edit
+    // immediately afterwards fails.
+    return refreshReferenceData();
+  }).then(function() {
     renderRuleSettings();
   }).catch(function(err) {
     showToast(err.message, 'error');
@@ -758,7 +805,8 @@ function submitBudgetRuleEdit(event) {
   serverCall('updateBudgetRule', data).then(function() {
     showToast('Budget rule updated!');
     _editingRuleId = null;
-    refreshReferenceData();
+    return refreshReferenceData();
+  }).then(function() {
     renderRuleSettings();
   }).catch(function(err) {
     showToast(err.message, 'error');
@@ -825,9 +873,9 @@ function renderContractSettings() {
           '<td class="number">' + formatCurrency(c.value, c.currency || 'NZD') + '</td>' +
           '<td><span class="badge badge-' + (isActive ? 'paid' : 'void') + '">' + escapeHtml(c.status) + '</span></td>' +
           '<td class="actions">' +
-            '<button type="button" class="btn-small btn-subtle" onclick="editContract(\'' + escapeHtml(c.contract_id) + '\')">Edit</button> ' +
+            '<button type="button" class="btn-small btn-subtle" onclick="editContract(\'' + jsAttr(c.contract_id) + '\')">Edit</button> ' +
             (isActive
-              ? '<button type="button" class="btn-small btn-subtle" onclick="completeContract(\'' + c.contract_id + '\')">Complete</button>'
+              ? '<button type="button" class="btn-small btn-subtle" onclick="completeContract(\'' + jsAttr(c.contract_id) + '\')">Complete</button>'
               : '') +
           '</td></tr>';
       });
@@ -863,7 +911,7 @@ function editContract(contractId) {
     area.innerHTML =
       '<article style="margin:1rem 0;">' +
         '<header><h4>Edit: ' + escapeHtml(c.name) + '</h4></header>' +
-        '<form onsubmit="saveContract(event, \'' + escapeHtml(c.contract_id) + '\')">' +
+        '<form onsubmit="saveContract(event, \'' + jsAttr(c.contract_id) + '\')">' +
           '<div class="form-row">' +
             '<label>Business <select id="econ-biz">' + bizOpts + '</select></label>' +
             '<label>Name <input type="text" id="econ-name" required value="' + escapeHtml(c.name) + '"></label>' +
@@ -885,7 +933,7 @@ function editContract(contractId) {
         '</form>' +
       '</article>';
     area.scrollIntoView({ behavior: 'smooth' });
-  });
+  }).catch(function(err) { showToast(err.message, 'error'); });
 }
 
 function saveContract(event, contractId) {

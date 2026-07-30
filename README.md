@@ -116,7 +116,8 @@ Google Spreadsheet (your private Sheet)
 ### Data Integrity
 
 - **Dropdown-driven entry**: Businesses, work codes, and accounts are selected from dropdowns.
-- **Sequential IDs with locking**: `LockService` prevents duplicate IDs across concurrent sessions.
+- **Sequential IDs with locking**: `withScriptLock` in `SheetService.gs` is the single place that touches `LockService`. It is re-entrant, so an operation like `allocateBudget` or `generateInvoice` holds **one** lock across its whole read-check-then-write. That matters: when ID generation took and released its own lock, an outer critical section lost its protection the moment it appended a row, and two concurrent requests could both pass the same "already exists?" check.
+- **Writes fail loudly on schema drift**: `appendRow` and `updateRow` build rows from the *sheet's* header row, so a field with no matching column would vanish silently. `assertKnownColumns` throws instead, naming the columns and telling you to run `setupSheets()`. The app also warns on load — see [Migrations](#migrations).
 - **Foreign keys by ID**: Renaming a business updates display everywhere automatically.
 - **Soft deletes**: Deactivating reference data hides it from dropdowns but preserves historical records.
 - **Upsert for summaries**: Account summaries for the same account+month are updated, not duplicated.
@@ -181,7 +182,19 @@ The spreadsheet has **11 tabs**, created automatically by `setupSheets()`:
 | **BudgetAllocations** | Per-invoice budget splits | allocation_id, invoice_id, category, category_key, scope, percentage, amount, status, transfer_date, notes |
 | **AccountSummaries** | Monthly account snapshots | summary_id, account_id, month, ending_balance, realised_gains, unrealised_gains, tax_paid, total_in, total_out, notes |
 
-`category_key` and `scope` are the identity columns on an allocation; `category` is the human-readable label. Rows written before the business/personal split carry only the label, and `setupSheets()` backfills them with `legacy_*` keys — amounts and statuses are never rewritten.
+`category_key` and `scope` are the identity columns on an allocation; `category` is the human-readable label.
+
+### Migrations
+
+Schema changes only take effect when `setupSheets()` runs. Until then, any write touching a new column loses that value — so the app makes this hard to miss:
+
+1. **Spreadsheet menu**: **Finance Tracker → Run setup / migrations** (and **Check for missing columns**), installed by `onOpen()` in `Main.gs`. No need to open the script editor.
+1. **Load-time banner**: `bootstrap()` returns `schemaWarnings` from `checkSchema()`, and the app shows a banner naming the sheets and columns that are missing.
+1. **Loud writes**: `assertKnownColumns` throws rather than dropping a field with no column.
+
+`setupSheets()` is idempotent and runs three steps: create missing sheets, append missing columns (`migrateColumns`), then repair allocation identity columns (`migrateBudgetAllocations`) and seed a company rule if none exists.
+
+`migrateBudgetAllocations` classifies **per invoice**, not per row. Six category labels — `Donate`, `Save`, `Invest`, `Spend`, `Tax Withheld`, `ACC Withheld` — are identical in both models, so a single row is ambiguous. A whole invoice is not: only a company allocation can contain `GST`, `Business Tax`, `Business ACC`, `Reserve`, `Owner Pay`, `Personal Tax` or `Personal ACC`. If any row in an invoice's set carries one of those, every row in that set is company. Amounts, labels and statuses are never rewritten — only the two identity columns are filled.
 
 ### Relationships
 
@@ -258,7 +271,7 @@ clasp open
 
 Then in the Apps Script editor:
 
-1. In the editor, run the `setupSheets` function (select it from the function dropdown and click Run). This creates all 11 tabs with headers, appends any missing columns, backfills identity columns on pre-company allocations, and seeds a company budget rule if none exists. Safe to re-run — it is idempotent.
+1. In the editor, run the `setupSheets` function (select it from the function dropdown and click Run). This creates all 11 tabs with headers, appends any missing columns, repairs allocation identity columns, and seeds a company budget rule if none exists. Safe to re-run — it is idempotent. **After the first run you can do this from the spreadsheet instead: Finance Tracker → Run setup / migrations.** Re-run it after every code update that changes the schema; the app shows a banner when columns are missing.
 2. Go to **Deploy > New deployment**
 3. Select type: **Web app**
 4. Set "Execute as": **Me**
@@ -336,7 +349,16 @@ For expenses: switch to the **Expenses** tab, select business and work code, ent
 4. Click **Confirm allocation** to write the rows. Buckets that come to zero are skipped.
 5. In **Budget > Money Flow**, action each allocation as you move the money — **Mark Paid** for obligations, **Mark Set Aside** for Reserve/Save/Invest, **Mark Transferred** for Owner Pay and Spend. **Undo** reverts.
 
-The Business and Personal sections show how much is still to action in each scope, so the business figure is what should still be sitting in the business bank account.
+### Reading the Money Flow tab
+
+It answers two questions and deliberately nothing else:
+
+1. **How much should be sitting in each pot.** The flow strip reads left to right — allocated income → business pot → Owner Pay drawn → personal pot — and each pot card breaks its buckets down by how the money leaves, with a subtotal per group:
+   1. a. **Owed out** — leaves your accounts entirely (GST, tax, ACC, donations).
+   1. b. **Held back** — stays where it is (Reserve, Save, Invest).
+   1. c. **To transfer** — moves between your own accounts (Owner Pay, Spend).
+   1. d. The business pot's total is what should still be sitting in the business bank account.
+1. **What needs doing.** One **Needs action** table lists every outstanding allocation across both pots, with the pot named on each row. Settled items and pre-company allocations are in collapsed sections underneath so they stay out of the way.
 
 ### Account Monitoring
 
@@ -357,7 +379,8 @@ MC/
 ├── README.md
 ├── tools/
 │   ├── check-budget-math.js        # Dependency-free node checks for the cascade
-│   └── check-budget-integration.js # allocate -> summarise, stubbed Sheets layer
+│   ├── check-budget-integration.js # allocate -> summarise, stubbed Sheets layer
+│   └── check-sheet-guards.js       # column guards, schema check, allocation repair
 └── src/
     ├── appsscript.json       # Apps Script manifest (runtime config, webapp settings)
     ├── server/
@@ -466,24 +489,24 @@ doGet()
     └── include() x8  (embeds all JS/CSS files)
 
 generateInvoice(params)
-├── getUninvoicedItemsInternal(businessId, dateFrom, dateTo)
-│   └── getAll('TimeEntries'), getAll('Expenses')
-├── appendRow('Invoices', data)
-│   └── generateId('Invoices')  [uses LockService]
-├── getSpreadsheet()  [uses SpreadsheetApp.getActiveSpreadsheet()]
-└── getColumnIndex(sheet, 'invoice_id')
+└── withScriptLock(...)          [ONE lock across select -> write -> stamp]
+    ├── getUninvoicedItemsInternal(businessId, dateFrom, dateTo, contractId)
+    │   └── getAll('TimeEntries'), getAll('Expenses'), findById('Contracts', ...)
+    ├── generateInvoiceId(dateTo)     [re-entrant, no separate lock]
+    ├── appendRow('Invoices', data)
+    └── stampInvoiceId(sheet, rows, id) x2   [batched into contiguous runs]
 
 allocateBudget(invoiceId, ruleId)
-├── findById('Invoices', invoiceId)
-│   └── getAll('Invoices')
-├── findById('BudgetRules', ruleId)
-├── buildAllocationPlan(invoice, rule)
-│   ├── invoiceAllocationBasis(invoice)          [billed hours, ex-GST]
-│   └── computeCompanyAllocation(...)            [or computeLegacyAllocation for a
-│       └── validateCompanyRule inputs applied    pre-company rule]
-├── appendRow('BudgetAllocations', ...) per non-zero line
-│   └── generateId('BudgetAllocations')  [each uses LockService]
-└── updateRow('Invoices', ...)
+└── withScriptLock(...)          [ONE lock, so the duplicate guard is race-safe]
+    ├── findById('Invoices', invoiceId)
+    ├── findById('BudgetRules', ruleId)
+    ├── buildAllocationPlan(invoice, rule)
+    │   ├── invoiceAllocationBasis(invoice)      [billed hours, ex-GST]
+    │   └── computeCompanyAllocation(...)        [or computeLegacyAllocation for a
+    │                                             pre-company rule]
+    ├── appendRow('BudgetAllocations', ...) per non-zero line
+    │   └── nextId('BudgetAllocations')          [lock already held]
+    └── updateRow('Invoices', ...)
 
 previewAllocation(invoiceId, ruleId)
 └── buildAllocationPlan(invoice, rule)   [same code path, nothing written]
@@ -539,12 +562,14 @@ The app itself only runs inside Apps Script, but the allocation cascade in `src/
 ```bash
 node tools/check-budget-math.js         # the cascade arithmetic
 node tools/check-budget-integration.js  # allocate -> summarise, with a stubbed Sheets layer
+node tools/check-sheet-guards.js        # column guards, schema check, allocation repair
 ```
 
 1. `check-budget-math.js` asserts the conservation invariant (every line sums to gross + GST), that Owner Pay is an exact remainder, that the distribution residual keeps the four personal buckets exact, that each rule-validation failure throws, and that the legacy sole-trader cascade produces figures identical to before the split.
 1. `check-budget-integration.js` stands in for the Sheets layer and checks that `allocateBudget` writes exactly what the preview promised, that `getBudgetSummary` returns the scoped shape the Budget page renders, that pre-company allocations resolve by label rather than colliding with the new personal buckets, and that settling and undoing move the right figures.
+1. `check-sheet-guards.js` runs `appendRow`/`updateRow`/`checkSchema`/`migrateBudgetAllocations` against an in-memory spreadsheet: a write with no matching column must throw and name it, and the allocation repair must classify per invoice — a company `Spend` becoming `legacy_spend` is the exact corruption it guards against.
 
-Run both before pushing any change to `BudgetCategories.gs` or `BudgetService.gs`. Neither replaces clicking through the deployed app — the Sheets layer, client rendering and migrations are only exercised there.
+Run all three before pushing any change to the budget or sheet layer. They do not replace clicking through the deployed app — the real Sheets API, client rendering and locking are only exercised there.
 
 ---
 

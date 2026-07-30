@@ -13,13 +13,19 @@ function getSpreadsheet() {
 }
 
 /**
- * Creates all sheets with headers. Safe to run multiple times -
- * skips sheets that already exist.
+ * The declared shape of every sheet: sheet name -> ordered column headers.
+ *
+ * Declared as a function rather than inline in setupSheets() so the schema can
+ * be read without running setup — checkSchema() uses it to warn when a sheet
+ * is missing columns, which is otherwise only discovered when a write silently
+ * loses data.
+ *
+ * Column ORDER here only applies to sheets created from scratch. migrateColumns
+ * appends to existing sheets, so a migrated column lands last regardless; every
+ * read and write resolves columns by header name, never position.
  */
-function setupSheets() {
-  var ss = getSpreadsheet();
-
-  var schemas = {
+function sheetSchemas() {
+  return {
     'Businesses': [
       'business_id', 'name', 'contact_name', 'email', 'address',
       'default_rate', 'currency', 'active'
@@ -76,6 +82,45 @@ function setupSheets() {
       'total_in', 'total_out', 'notes'
     ]
   };
+}
+
+/**
+ * Report any declared column that is missing from a sheet.
+ * Returns [{sheet, missing:[...]}] — empty when the spreadsheet is up to date.
+ *
+ * Writes fail loudly on a missing column (see assertKnownColumns), but by then
+ * the user has already lost the form they filled in. This lets the app warn
+ * first.
+ */
+function checkSchema() {
+  var ss = getSpreadsheet();
+  var schemas = sheetSchemas();
+  var warnings = [];
+
+  Object.keys(schemas).forEach(function(sheetName) {
+    var sheet = ss.getSheetByName(sheetName);
+    if (!sheet) {
+      warnings.push({ sheet: sheetName, missing: schemas[sheetName].slice() });
+      return;
+    }
+    var lastCol = sheet.getLastColumn();
+    var headers = lastCol > 0 ? sheet.getRange(1, 1, 1, lastCol).getValues()[0] : [];
+    var missing = schemas[sheetName].filter(function(col) {
+      return headers.indexOf(col) === -1;
+    });
+    if (missing.length > 0) warnings.push({ sheet: sheetName, missing: missing });
+  });
+
+  return warnings;
+}
+
+/**
+ * Creates all sheets with headers. Safe to run multiple times -
+ * skips sheets that already exist.
+ */
+function setupSheets() {
+  var ss = getSpreadsheet();
+  var schemas = sheetSchemas();
 
   var existingSheets = ss.getSheets().map(function(s) { return s.getName(); });
 
@@ -147,15 +192,30 @@ function migrateBudgetAllocations() {
   if (lastRow < 2 || lastCol < 1) return 0;
 
   var headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+  var invCol = headers.indexOf('invoice_id');
   var catCol = headers.indexOf('category');
   var keyCol = headers.indexOf('category_key');
   var scopeCol = headers.indexOf('scope');
-  if (catCol === -1 || keyCol === -1 || scopeCol === -1) {
+  if (invCol === -1 || catCol === -1 || keyCol === -1 || scopeCol === -1) {
     Logger.log('migrateBudgetAllocations: columns missing, run setupSheets first');
     return 0;
   }
 
   var values = sheet.getRange(2, 1, lastRow - 1, lastCol).getValues();
+
+  // Decide per INVOICE, not per row. The company labels Donate/Save/Invest/
+  // Spend and Tax/ACC Withheld are identical to the legacy ones, so a single
+  // row is ambiguous — but a whole invoice is not: only a company allocation
+  // can contain 'Business Tax', 'Reserve', 'Owner Pay' and friends. So if any
+  // row in an invoice's set carries a company-exclusive label, every row in
+  // that set is a company allocation.
+  var companyInvoices = {};
+  values.forEach(function(row) {
+    if (isCompanyOnlyLabel(String(row[catCol]))) {
+      companyInvoices[normalizeId(row[invCol])] = true;
+    }
+  });
+
   var keys = [];
   var scopes = [];
   var stamped = 0;
@@ -167,9 +227,16 @@ function migrateBudgetAllocations() {
       scopes.push([row[scopeCol]]);
       return;
     }
-    var key = LEGACY_LABEL_TO_KEY[String(row[catCol])] || '';
+
+    var label = String(row[catCol]);
+    var isCompany = !!companyInvoices[normalizeId(row[invCol])];
+    var key = isCompany
+      ? (COMPANY_LABEL_TO_KEY[label] || '')
+      : (LEGACY_LABEL_TO_KEY[label] || '');
+
+    var def = key ? getCategoryDef(key) : null;
     keys.push([key]);
-    scopes.push([key ? 'legacy' : row[scopeCol]]);
+    scopes.push([def ? def.scope : row[scopeCol]]);
     if (key) stamped++;
   });
 
@@ -178,7 +245,7 @@ function migrateBudgetAllocations() {
     sheet.getRange(2, scopeCol + 1, scopes.length, 1).setValues(scopes);
   }
 
-  Logger.log('migrateBudgetAllocations: stamped ' + stamped + ' legacy row(s)');
+  Logger.log('migrateBudgetAllocations: stamped ' + stamped + ' row(s)');
   return stamped;
 }
 
@@ -195,14 +262,20 @@ function seedCompanyBudgetRule() {
     return null;
   }
 
-  var hasCompanyRule = rules.some(function(r) { return ruleModel(r) === MODEL_COMPANY; });
-  if (hasCompanyRule) {
+  // Guard on the name as well as the model: if the `model` column is missing,
+  // ruleModel() can never report company, and this would append another
+  // 'Company Default' on every run, each one stealing is_default.
+  var SEED_NAME = 'Company Default';
+  var alreadySeeded = rules.some(function(r) {
+    return ruleModel(r) === MODEL_COMPANY || String(r.name || '').trim() === SEED_NAME;
+  });
+  if (alreadySeeded) {
     Logger.log('seedCompanyBudgetRule: company rule already exists, skipping');
     return null;
   }
 
   var data = {
-    name: 'Company Default',
+    name: SEED_NAME,
     model: MODEL_COMPANY,
     is_default: true,
     notes: 'Seeded defaults — review every percentage before relying on it.'

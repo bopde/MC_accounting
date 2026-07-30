@@ -2,19 +2,23 @@
 /**
  * Budget Allocations module.
  *
- * Money is split across two scopes joined by the Owner Pay bridge:
+ * Money sits in two pots joined by the Owner Pay bridge:
  *   Business — GST, Business Tax, Business ACC, Reserve. Stays in the
  *              business account.
  *   Owner Pay — the remainder, drawn from business to personal.
  *   Personal — Personal Tax, Personal ACC, Donate, Save, Invest, Spend.
  *
- * Category definitions, ordering and the whole cascade come from the server
- * registry (BudgetCategories.gs) via AppCache.budgetCategories. This file
- * keeps no list of its own and does no allocation maths — the preview is
- * computed by the same server code that writes the allocations.
+ * The Money Flow tab answers two questions and nothing else: how much should
+ * still be sitting in each pot, and what needs actioning. Each pot breaks its
+ * buckets down by how the money leaves (owed out / held back / to transfer),
+ * and every outstanding allocation across both pots appears in one action list.
  *
- * Stored status model: allocated -> paid. The button wording varies by how
- * the money actually moves (paid out / set aside / transferred).
+ * Category definitions, ordering, settle wording and the whole cascade come
+ * from the server registry (BudgetCategories.gs) via AppCache.budgetCategories.
+ * This file keeps no list of its own and does no allocation maths — the preview
+ * is computed by the same server code that writes the allocations.
+ *
+ * Stored status model: allocated -> paid.
  */
 
 function renderBudgetPage(container) {
@@ -41,7 +45,7 @@ function showBudgetTab(tab) {
   }
 }
 
-// --- Budget Summary ---
+// --- Money Flow ---
 
 function renderBudgetSummary() {
   var content = document.getElementById('budget-tab-content');
@@ -67,11 +71,9 @@ function renderBudgetSummary() {
 
   serverCall('getBudgetSummary', { dateFrom: AppState.dateFrom, dateTo: AppState.dateTo }).then(function(summary) {
     var body = document.getElementById('budget-summary-body');
-    var scopes = (summary && summary.scopes) || [];
-    var totals = (summary && summary.totals) || {};
-    var holdings = (summary && summary.accountHoldings) || {};
-    var bridge = (summary && summary.bridge) || { allocated: 0, paid: 0, outstanding: 0 };
+    if (!body) return;
 
+    var scopes = (summary && summary.scopes) || [];
     if (!scopes.length) {
       body.innerHTML =
         '<article class="empty-state">' +
@@ -81,183 +83,287 @@ function renderBudgetSummary() {
       return;
     }
 
-    var html = '';
-
-    // --- Overview tiles ---
-    html += '<section class="flow-group">' +
-      '<h3 class="flow-group__title">Overview</h3>' +
-      '<div class="flow-overview">' +
-        '<div class="flow-tile flow-tile--total">' +
-          '<span class="flow-tile__label">Total allocated</span>' +
-          '<span class="flow-tile__value">' + formatCurrency(totals.allocated) + '</span>' +
-          '<span class="flow-tile__detail">across ' + (totals.allocationCount || 0) + ' allocations</span>' +
-        '</div>' +
-        '<div class="flow-tile flow-tile--paid">' +
-          '<span class="flow-tile__label">Moved / paid</span>' +
-          '<span class="flow-tile__value">' + formatCurrency(totals.paid) + '</span>' +
-          '<span class="flow-tile__detail">' + pctOf(totals.paid, totals.allocated) + ' of total</span>' +
-        '</div>' +
-        '<div class="flow-tile flow-tile--outstanding">' +
-          '<span class="flow-tile__label">Still to move</span>' +
-          '<span class="flow-tile__value">' + formatCurrency(totals.outstanding) + '</span>' +
-          '<span class="flow-tile__detail">' + pctOf(totals.outstanding, totals.allocated) + ' of total</span>' +
-        '</div>' +
-      '</div>' +
-      '<p class="muted small" style="margin:0.35rem 0 0;">Owner Pay is excluded from these totals — ' +
-        'it moves money between your own accounts rather than adding to it.</p>' +
-    '</section>';
-
-    // --- Business / personal split at a glance ---
-    html += '<section class="flow-group">' +
-      '<h3 class="flow-group__title">Business vs personal</h3>' +
-      '<div class="flow-grid">' +
-        tilePlain('Business — still to action', holdings.business,
-          'GST, tax, ACC and reserve not yet actioned') +
-        tilePlain('Drawn to personal (Owner Pay)', bridge.paid,
-          formatCurrency(bridge.outstanding) + ' still to draw') +
-        tilePlain('Personal — still to action', holdings.personal,
-          'personal allocations not yet actioned') +
-      '</div>' +
-      '<p class="muted small" style="margin:0.35rem 0 0;">' +
-        'Business figures are money the company owes or is holding back, so they should still be ' +
-        'sitting in the business account.' +
-        (holdings.legacy
-          ? ' A further ' + formatCurrency(holdings.legacy) + ' is outstanding against pre-company (sole trader) allocations.'
-          : '') +
-      '</p>' +
-    '</section>';
-
-    // --- Per-scope tiles ---
-    scopes.forEach(function(group) {
-      if (group.scope === 'bridge') return; // covered by the tile above
-      html += '<section class="flow-group">' +
-        '<h3 class="flow-group__title">' + escapeHtml(group.label) +
-          ' <span class="muted small">' + formatCurrency(group.outstanding) + ' outstanding of ' +
-          formatCurrency(group.allocated) + '</span></h3>' +
-        '<div class="flow-grid">' +
-          group.categories.map(function(cat) {
-            return cat.isWithheld
-              ? tileWithheldPaid(cat.category + ' (at source)', cat.paid)
-              : tileSplit(cat.category, cat.allocated, cat.paid, cat.outstanding);
-          }).join('') +
-        '</div>' +
-      '</section>';
-    });
-
-    // --- Per-category detail, grouped by scope ---
-    html += '<section class="flow-group">' +
-      '<h3 class="flow-group__title">By category</h3>';
-
-    scopes.forEach(function(group) {
-      html += '<h4 class="muted" style="margin:0.75rem 0 0.35rem;">' + escapeHtml(group.label) + '</h4>' +
-        '<div class="category-list">' +
-        group.categories.map(renderCategoryBlock).join('') +
-        '</div>';
-    });
-
-    html += '</section>';
-
-    body.innerHTML = html;
+    body.innerHTML =
+      renderFlowStrip(summary) +
+      renderPots(summary) +
+      renderActionList(summary) +
+      renderActionedList(summary) +
+      renderLegacySection(summary);
   }).catch(function(err) {
     var body = document.getElementById('budget-summary-body');
     if (body) body.innerHTML = '<p class="error">Error: ' + escapeHtml(err.message) + '</p>';
   });
 }
 
-function pctOf(part, total) {
-  if (!total || total === 0) return '0%';
-  return ((Number(part) / Number(total)) * 100).toFixed(0) + '%';
+function scopeOf(summary, scope) {
+  return ((summary && summary.scopes) || []).find(function(s) { return s.scope === scope; }) || null;
 }
 
-function tilePlain(label, amount, detail) {
-  return '<div class="mini-tile">' +
-    '<span class="mini-tile__label">' + escapeHtml(label) + '</span>' +
-    '<span class="mini-tile__value">' + formatCurrency(amount || 0) + '</span>' +
-    '<span class="mini-tile__detail">' + escapeHtml(detail || '') + '</span>' +
-  '</div>';
-}
+/**
+ * Income -> business pot -> Owner Pay -> personal pot, on one line.
+ */
+function renderFlowStrip(summary) {
+  var totals = summary.totals || {};
+  var holdings = summary.accountHoldings || {};
+  var bridge = summary.bridge || { allocated: 0, paid: 0, outstanding: 0 };
 
-function tileWithheldPaid(label, amount) {
-  return '<div class="mini-tile mini-tile--withheld">' +
-    '<span class="mini-tile__label">' + escapeHtml(label) + '</span>' +
-    '<span class="mini-tile__value">' + formatCurrency(amount || 0) + '</span>' +
-    '<span class="mini-tile__detail">auto-paid</span>' +
-  '</div>';
-}
+  function step(label, value, detail) {
+    return '<div class="flow-step">' +
+      '<span class="flow-step__label">' + escapeHtml(label) + '</span>' +
+      '<span class="flow-step__value">' + formatCurrency(value || 0) + '</span>' +
+      '<span class="flow-step__detail">' + escapeHtml(detail) + '</span>' +
+    '</div>';
+  }
 
-function tileSplit(label, allocated, paid, outstanding) {
-  return '<div class="mini-tile mini-tile--split">' +
-    '<span class="mini-tile__label">' + escapeHtml(label) + '</span>' +
-    '<span class="mini-tile__value">' + formatCurrency(outstanding || 0) + '</span>' +
-    '<span class="mini-tile__detail">outstanding</span>' +
-    '<div class="mini-tile__bar">' +
-      '<div class="mini-tile__bar-paid" style="width:' + pctOf(paid, allocated) + '"></div>' +
+  return '<section class="flow-group">' +
+    '<div class="flow-strip">' +
+      step('Allocated income', totals.allocated,
+        (totals.allocationCount || 0) + ' allocations') +
+      '<span class="flow-strip__arrow" aria-hidden="true">&rarr;</span>' +
+      step('Business pot', holdings.business, 'still to action') +
+      '<span class="flow-strip__arrow" aria-hidden="true">&rarr;</span>' +
+      step('Owner Pay drawn', bridge.paid,
+        formatCurrency(bridge.outstanding) + ' still to draw') +
+      '<span class="flow-strip__arrow" aria-hidden="true">&rarr;</span>' +
+      step('Personal pot', holdings.personal, 'still to action') +
     '</div>' +
-    '<div class="mini-tile__split">' +
-      '<span>Paid ' + formatCurrency(paid || 0) + '</span>' +
-      '<span>of ' + formatCurrency(allocated || 0) + '</span>' +
-    '</div>' +
-  '</div>';
+    '<p class="muted small" style="margin:0.4rem 0 0;">' +
+      'Owner Pay is a transfer between your own accounts, so it is not counted in allocated income.' +
+    '</p>' +
+  '</section>';
 }
 
-function renderCategoryBlock(cat) {
-  var isWithheld = cat.isWithheld;
-  var barPct = pctOf(cat.paid, cat.allocated);
-  var actionLabel = settleActionLabel(cat.settle);
-  var movedWord = cat.settle === 'hold' ? 'set aside' : 'moved';
+/**
+ * One card per pot. Buckets grouped by how the money leaves, with a subtotal
+ * per group — that grouping is what makes "what is owed where" readable.
+ */
+function renderPots(summary) {
+  var holdings = summary.accountHoldings || {};
+  var html = '<div class="pot-grid">';
 
-  var html = '<article class="category-block">' +
-    '<header class="category-block__header">' +
-      '<div>' +
-        '<h4>' + escapeHtml(cat.category) + (isWithheld ? ' <span class="tag tag--auto">auto-paid</span>' : '') + '</h4>' +
-        '<p class="muted">' + formatCurrency(cat.paid) + ' ' + movedWord +
-          (!isWithheld ? ' · <strong>' + formatCurrency(cat.outstanding) + ' outstanding</strong>' : '') +
-          ' · ' + formatCurrency(cat.allocated) + ' total' +
-        '</p>' +
+  ['business', 'personal'].forEach(function(scopeName) {
+    var group = scopeOf(summary, scopeName);
+    if (!group) return;
+    html += renderPotCard(group, holdings[scopeName] || 0);
+  });
+
+  html += '</div>';
+  return html;
+}
+
+function renderPotCard(group, stillToAction) {
+  var html = '<article class="pot-card">' +
+    '<header class="pot-card__header">' +
+      '<h3>' + escapeHtml(group.label) + '</h3>' +
+      '<div class="pot-card__headline">' +
+        '<span class="pot-card__amount">' + formatCurrency(stillToAction) + '</span>' +
+        '<span class="muted small">still to action</span>' +
       '</div>' +
-      '<div class="category-block__total">' + formatCurrency(cat.allocated) + '</div>' +
     '</header>' +
-    '<div class="progress-bar"><div class="progress-bar__fill" style="width:' + barPct + '"></div></div>' +
-    '<table class="data-table data-table--compact">' +
-      '<thead><tr>' +
-        '<th>Invoice</th><th>Source</th><th class="number">Amount</th>' +
-        '<th>Status</th><th>Moved on</th><th>Note</th><th></th>' +
-      '</tr></thead><tbody>';
+    '<table class="data-table data-table--compact pot-card__table"><tbody>';
 
-  cat.items.sort(function(a, b) {
-    var sa = String(a.invoice_id), sb = String(b.invoice_id);
-    var ma = sa.match(/^(\d+)(.*)$/), mb = sb.match(/^(\d+)(.*)$/);
-    if (ma && mb) {
-      var na = parseInt(ma[1], 10), nb = parseInt(mb[1], 10);
-      if (na !== nb) return na - nb;
-      return ma[2].localeCompare(mb[2]);
-    }
-    return sa.localeCompare(sb);
+  var byMode = {};
+  group.categories.forEach(function(cat) {
+    if (!byMode[cat.settle]) byMode[cat.settle] = [];
+    byMode[cat.settle].push(cat);
   });
 
-  cat.items.forEach(function(item) {
-    var status = item.status || 'allocated';
-    html += '<tr>' +
-      '<td><code>' + escapeHtml(item.invoice_id) + '</code></td>' +
-      '<td>' + escapeHtml(item.business_name) + '</td>' +
-      '<td class="number">' + formatCurrency(item.amount) + '</td>' +
-      '<td><span class="badge badge-' + status + '">' + status + '</span></td>' +
-      '<td>' + (item.transfer_date ? formatDate(item.transfer_date) : '<span class="muted">—</span>') + '</td>' +
-      '<td>' + (item.notes ? escapeHtml(item.notes) : '<span class="muted">—</span>') + '</td>' +
-      '<td class="actions">';
+  var rendered = 0;
+  settleGroupOrder().forEach(function(mode) {
+    var cats = byMode[mode];
+    if (!cats || !cats.length) return;
+    rendered++;
 
-    if (!isWithheld) {
-      if (status === 'allocated') {
-        html += '<button type="button" class="btn-small btn-primary" onclick="markAllocationPaid(\'' + item.allocation_id + '\')">' +
-          escapeHtml(actionLabel) + '</button>';
-      } else if (status === 'paid') {
-        html += '<button type="button" class="btn-small btn-subtle" onclick="markAllocationUnpaid(\'' + item.allocation_id + '\')">Undo</button>';
-      }
-    }
+    var mineOutstanding = 0;
+    var mineAllocated = 0;
+    cats.forEach(function(c) {
+      mineOutstanding += c.outstanding;
+      mineAllocated += c.allocated;
+    });
 
-    html += '</td></tr>';
+    var meta = settleMode(mode);
+    html += '<tr class="group-row"><td>' + escapeHtml(meta.groupLabel) + '</td>' +
+      '<td class="number">' + formatCurrency(mode === 'auto_paid' ? mineAllocated : mineOutstanding) + '</td>' +
+      '<td class="number muted">of ' + formatCurrency(mineAllocated) + '</td></tr>';
+
+    cats.forEach(function(cat) {
+      var settledWord = settleMode(cat.settle).settledWord;
+      html += '<tr>' +
+        '<td>' + escapeHtml(cat.category) + '</td>' +
+        '<td class="number">' + formatCurrency(cat.outstanding) + '</td>' +
+        '<td class="number muted">' + formatCurrency(cat.paid) + ' ' + escapeHtml(settledWord) + '</td>' +
+      '</tr>';
+    });
   });
+
+  if (rendered === 0) {
+    html += '<tr><td colspan="3" class="muted">Nothing allocated in this range.</td></tr>';
+  }
+
   html += '</tbody></table></article>';
+  return html;
+}
+
+/**
+ * Every outstanding allocation across both pots, in one list. Replaces the
+ * per-category tables — the question is "what do I need to do", and that does
+ * not divide neatly by category.
+ */
+function collectItems(summary, wantPaid) {
+  var rows = [];
+  ((summary && summary.scopes) || []).forEach(function(group) {
+    if (group.scope === 'legacy') return;
+    group.categories.forEach(function(cat) {
+      (cat.items || []).forEach(function(item) {
+        var isPaid = item.status === 'paid';
+        if (isPaid !== wantPaid) return;
+        // Withheld money never arrived, so there is nothing to action.
+        if (!wantPaid && cat.settle === 'auto_paid') return;
+        rows.push({
+          pot: group.label,
+          scope: group.scope,
+          category: cat.category,
+          settle: cat.settle,
+          item: item
+        });
+      });
+    });
+  });
+  return rows;
+}
+
+function sortInvoiceIds(a, b) {
+  var sa = String(a), sb = String(b);
+  var ma = sa.match(/^(\d+)(.*)$/), mb = sb.match(/^(\d+)(.*)$/);
+  if (ma && mb) {
+    var na = parseInt(ma[1], 10), nb = parseInt(mb[1], 10);
+    if (na !== nb) return na - nb;
+    return ma[2].localeCompare(mb[2]);
+  }
+  return sa.localeCompare(sb);
+}
+
+function renderActionList(summary) {
+  var rows = collectItems(summary, false);
+  var total = rows.reduce(function(s, r) { return s + (Number(r.item.amount) || 0); }, 0);
+
+  if (rows.length === 0) {
+    return '<section class="flow-group">' +
+      '<h3 class="flow-group__title">Needs action</h3>' +
+      '<p class="muted">Everything allocated in this range has been actioned.</p>' +
+    '</section>';
+  }
+
+  rows.sort(function(a, b) {
+    if (a.scope !== b.scope) return a.scope === 'business' ? -1 : 1;
+    if (a.category !== b.category) return a.category.localeCompare(b.category);
+    return sortInvoiceIds(a.item.invoice_id, b.item.invoice_id);
+  });
+
+  var html = '<section class="flow-group">' +
+    '<h3 class="flow-group__title">Needs action ' +
+      '<span class="muted small">' + rows.length + ' items &middot; ' + formatCurrency(total) + '</span></h3>' +
+    '<div class="scroll-x"><table class="data-table"><thead><tr>' +
+      '<th>Pot</th><th>Category</th><th>Invoice</th><th>Client</th>' +
+      '<th class="number">Amount</th><th></th>' +
+    '</tr></thead><tbody>';
+
+  rows.forEach(function(row) {
+    html += '<tr>' +
+      '<td><span class="pot-tag pot-tag--' + escapeHtml(row.scope) + '">' + escapeHtml(row.pot) + '</span></td>' +
+      '<td>' + escapeHtml(row.category) + '</td>' +
+      '<td><code>' + escapeHtml(row.item.invoice_id) + '</code></td>' +
+      '<td>' + escapeHtml(row.item.business_name) + '</td>' +
+      '<td class="number">' + formatCurrency(row.item.amount) + '</td>' +
+      '<td class="actions"><button type="button" class="btn-small btn-primary" ' +
+        'onclick="markAllocationPaid(\'' + jsAttr(row.item.allocation_id) + '\')">' +
+        escapeHtml(settleActionLabel(row.settle)) + '</button></td>' +
+    '</tr>';
+  });
+
+  html += '</tbody></table></div></section>';
+  return html;
+}
+
+function renderActionedList(summary) {
+  var rows = collectItems(summary, true);
+  if (rows.length === 0) return '';
+
+  var total = rows.reduce(function(s, r) { return s + (Number(r.item.amount) || 0); }, 0);
+
+  rows.sort(function(a, b) {
+    var da = String(a.item.transfer_date || ''), db = String(b.item.transfer_date || '');
+    if (da !== db) return db.localeCompare(da);
+    return sortInvoiceIds(a.item.invoice_id, b.item.invoice_id);
+  });
+
+  var html = '<details class="flow-group"><summary class="flow-group__title">' +
+    'Actioned <span class="muted small">' + rows.length + ' items &middot; ' + formatCurrency(total) + '</span>' +
+    '</summary>' +
+    '<div class="scroll-x"><table class="data-table"><thead><tr>' +
+      '<th>Pot</th><th>Category</th><th>Invoice</th><th class="number">Amount</th>' +
+      '<th>On</th><th>Note</th><th></th>' +
+    '</tr></thead><tbody>';
+
+  rows.forEach(function(row) {
+    var isAuto = row.settle === 'auto_paid';
+    html += '<tr>' +
+      '<td><span class="pot-tag pot-tag--' + escapeHtml(row.scope) + '">' + escapeHtml(row.pot) + '</span></td>' +
+      '<td>' + escapeHtml(row.category) +
+        (isAuto ? ' <span class="tag tag--auto">at source</span>' : '') + '</td>' +
+      '<td><code>' + escapeHtml(row.item.invoice_id) + '</code></td>' +
+      '<td class="number">' + formatCurrency(row.item.amount) + '</td>' +
+      '<td>' + (row.item.transfer_date ? formatDate(row.item.transfer_date) : '<span class="muted">—</span>') + '</td>' +
+      '<td>' + (row.item.notes ? escapeHtml(row.item.notes) : '<span class="muted">—</span>') + '</td>' +
+      '<td class="actions">' +
+        (isAuto ? '' : '<button type="button" class="btn-small btn-subtle" ' +
+          'onclick="markAllocationUnpaid(\'' + jsAttr(row.item.allocation_id) + '\')">Undo</button>') +
+      '</td>' +
+    '</tr>';
+  });
+
+  html += '</tbody></table></div></details>';
+  return html;
+}
+
+/**
+ * Pre-company allocations, kept out of the way but not hidden.
+ */
+function renderLegacySection(summary) {
+  var group = scopeOf(summary, 'legacy');
+  if (!group || !group.categories.length) return '';
+
+  var holdings = summary.accountHoldings || {};
+  var html = '<details class="flow-group"><summary class="flow-group__title">' +
+    escapeHtml(group.label) +
+    ' <span class="muted small">' + formatCurrency(holdings.legacy || 0) + ' still to action</span>' +
+    '</summary>' +
+    '<p class="muted small">Allocations made before the business/personal split. Kept for the record.</p>' +
+    '<div class="scroll-x"><table class="data-table"><thead><tr>' +
+      '<th>Category</th><th>Invoice</th><th class="number">Amount</th><th>Status</th><th></th>' +
+    '</tr></thead><tbody>';
+
+  group.categories.forEach(function(cat) {
+    cat.items.slice().sort(function(a, b) { return sortInvoiceIds(a.invoice_id, b.invoice_id); })
+      .forEach(function(item) {
+        var status = item.status || 'allocated';
+        html += '<tr>' +
+          '<td>' + escapeHtml(cat.category) + '</td>' +
+          '<td><code>' + escapeHtml(item.invoice_id) + '</code></td>' +
+          '<td class="number">' + formatCurrency(item.amount) + '</td>' +
+          '<td><span class="badge badge-' + escapeHtml(status) + '">' + escapeHtml(status) + '</span></td>' +
+          '<td class="actions">' +
+            (cat.isWithheld ? '' : (status === 'allocated'
+              ? '<button type="button" class="btn-small btn-subtle" onclick="markAllocationPaid(\'' +
+                jsAttr(item.allocation_id) + '\')">Mark Paid</button>'
+              : '<button type="button" class="btn-small btn-subtle" onclick="markAllocationUnpaid(\'' +
+                jsAttr(item.allocation_id) + '\')">Undo</button>')) +
+          '</td>' +
+        '</tr>';
+      });
+  });
+
+  html += '</tbody></table></div></details>';
   return html;
 }
 
@@ -266,7 +372,7 @@ function markAllocationPaid(allocationId) {
   if (note === null) return;
   var params = allocationId + '|paid|' + todayStr() + '|' + (note || '');
   serverCall('updateAllocationStatusFromClient', params).then(function() {
-    showToast('Marked as paid');
+    showToast('Marked as actioned');
     renderBudgetSummary();
   }).catch(function(err) { showToast(err.message, 'error'); });
 }
@@ -284,27 +390,38 @@ function renderBudgetAllocate() {
   var content = document.getElementById('budget-tab-content');
   content.innerHTML = '<div aria-busy="true">Loading invoices...</div>';
 
+  // Its own date range: AppState.dateFrom/dateTo is a global that every other
+  // page overwrites, so visiting Hours first used to shrink this to two days
+  // and report "nothing to allocate" — with no date control here to see why.
+  var range = datePreset('ytd');
+
   Promise.all([
-    serverCall('getInvoicesWithDetails', { dateFrom: AppState.dateFrom, dateTo: AppState.dateTo }),
-    serverCall('getAllClient', 'BudgetAllocations')
+    serverCall('getInvoicesWithDetails', { dateFrom: range.from, dateTo: range.to }),
+    serverCall('getAllClient', 'BudgetAllocations'),
+    serverCall('getBudgetRules')
   ]).then(function(results) {
     var invoices = results[0] || [];
     var existingAllocs = results[1] || [];
-    var rules = AppCache.budgetRules || [];
+    var rules = (results[2] || []).filter(function(r) {
+      return isFlagTrue(r.active) || r.active === '' || r.active === undefined || r.active === null;
+    });
 
+    // normalizeId on both sides: Sheets stores invoice_id '0526' on the
+    // allocation row as the number 526, so a raw key never matched and an
+    // allocated invoice stayed in this list forever.
     var allocatedInvoiceIds = {};
-    existingAllocs.forEach(function(a) { allocatedInvoiceIds[a.invoice_id] = true; });
+    existingAllocs.forEach(function(a) { allocatedInvoiceIds[normalizeId(a.invoice_id)] = true; });
 
-    // Only paid invoices, not yet allocated
     var eligible = invoices.filter(function(inv) {
-      return inv.status === 'paid' && !allocatedInvoiceIds[inv.invoice_id];
+      return inv.status === 'paid' && !allocatedInvoiceIds[normalizeId(inv.invoice_id)];
     });
 
     if (eligible.length === 0) {
       content.innerHTML =
         '<article class="empty-state">' +
           '<h3>Nothing to allocate</h3>' +
-          '<p class="muted">Every paid invoice is already allocated. Mark a new invoice as paid in the Invoices tab to allocate it here.</p>' +
+          '<p class="muted">Every paid invoice created between ' + escapeHtml(range.from) + ' and ' +
+            escapeHtml(range.to) + ' is already allocated. Mark a new invoice as paid in the Invoices tab to allocate it here.</p>' +
         '</article>';
       return;
     }
@@ -313,14 +430,12 @@ function renderBudgetAllocate() {
       content.innerHTML =
         '<article class="empty-state">' +
           '<h3>No budget rules yet</h3>' +
-          '<p class="muted">Add a budget rule under Settings → Budget Rules before allocating.</p>' +
+          '<p class="muted">Add a budget rule under Settings &rarr; Budget Rules before allocating.</p>' +
         '</article>';
       return;
     }
 
-    var defaultRule = rules.find(function(r) {
-      return r.is_default === true || r.is_default === 'TRUE' || r.is_default === 'true';
-    }) || rules[0];
+    var defaultRule = rules.find(function(r) { return isFlagTrue(r.is_default); }) || rules[0];
 
     var invoiceOptions = eligible.map(function(inv) {
       return {
@@ -333,11 +448,11 @@ function renderBudgetAllocate() {
     var ruleOptions = rules.map(function(r) {
       return {
         id: r.rule_id,
-        label: r.name + (r.model === 'company' ? '' : ' (sole trader)')
+        label: r.name + (ruleModelOf(r) === 'company' ? '' : ' (sole trader)')
       };
     });
 
-    var html =
+    content.innerHTML =
       '<form id="allocate-form" class="form-card">' +
         '<div class="form-row">' +
           '<label>Invoice ' + buildSelect('ba-invoice', invoiceOptions, 'id', 'label', { required: true }) + '</label>' +
@@ -348,8 +463,6 @@ function renderBudgetAllocate() {
         '</div>' +
       '</form>' +
       '<div id="allocation-preview"></div>';
-
-    content.innerHTML = html;
   }).catch(function(err) {
     content.innerHTML = '<p class="error">Error: ' + escapeHtml(err.message) + '</p>';
   });
@@ -410,9 +523,10 @@ function previewAllocation() {
     var currency = data.currency || 'NZD';
     var lines = data.lines || [];
     var isCompany = data.model === 'company';
+    var stages = data.stages || {};
 
     var explainer = isCompany
-      ? 'Budget is allocated from billed hours only (expenses are pass-throughs). ' +
+      ? 'Allocated from billed hours only — expenses are pass-throughs. ' +
         'Business tax, ACC and reserve come off business income; what is left is Owner Pay, ' +
         'drawn to your personal account. Personal tax and ACC come off Owner Pay, and ' +
         'Donate/Save/Invest/Spend split what remains. GST is held for the IRD and sits outside the split.'
@@ -427,31 +541,32 @@ function previewAllocation() {
             ' · Rule: <strong>' + escapeHtml(data.rule.name) + '</strong>' +
             (isCompany ? '' : ' <span class="tag">sole trader</span>') + '</p>' +
         '</header>' +
-        '<div class="preview-numbers">' + cascadeRows(data.model, data.stages || {}, currency) + '</div>' +
+        '<div class="preview-numbers">' + cascadeRows(data.model, stages, currency) + '</div>' +
         '<p class="muted" style="font-size:0.78rem;margin:0 0 0.5rem;">' + explainer + '</p>' +
-        '<table class="data-table">' +
-          '<thead><tr><th>Category</th><th class="number">%</th><th class="number">Amount</th><th>Note</th></tr></thead><tbody>';
+        '<div class="scroll-x"><table class="data-table">' +
+          '<thead><tr><th>Pot</th><th>Category</th><th class="number">%</th><th class="number">Amount</th><th>From</th></tr></thead><tbody>';
 
     var basisNote = {
-      gross: 'From gross',
-      invoice_gst: 'From invoice GST',
-      business_income: 'From business income',
-      remainder: 'Remainder — business income less business allocations',
-      owner_pay: 'From Owner Pay',
-      personal_net: 'From personal net',
-      adjusted: 'From adjusted',
-      net: 'From net'
+      gross: 'Gross',
+      invoice_gst: 'Invoice GST',
+      business_income: 'Business income',
+      remainder: 'Remainder after business allocations',
+      owner_pay: 'Owner Pay',
+      personal_net: 'Personal net',
+      adjusted: 'Adjusted',
+      net: 'Net'
     };
 
     var lastScope = null;
     lines.forEach(function(line) {
       if (line.scope !== lastScope) {
         lastScope = line.scope;
-        html += '<tr class="group-row"><td colspan="4"><strong>' + escapeHtml(scopeLabel(line.scope)) + '</strong></td></tr>';
+        html += '<tr class="group-row"><td colspan="5">' + escapeHtml(allocationScopeLabel(line.scope)) + '</td></tr>';
       }
       html += '<tr>' +
+        '<td><span class="pot-tag pot-tag--' + escapeHtml(line.scope) + '">' + escapeHtml(allocationScopeLabel(line.scope)) + '</span></td>' +
         '<td>' + escapeHtml(line.label) +
-          (line.settle === 'auto_paid' ? ' <span class="tag tag--auto">auto-paid</span>' : '') +
+          (line.settle === 'auto_paid' ? ' <span class="tag tag--auto">at source</span>' : '') +
           (line.isTransfer ? ' <span class="tag">transfer</span>' : '') + '</td>' +
         '<td class="number">' + (line.pct == null ? '—' : formatPercent(line.pct)) + '</td>' +
         '<td class="number">' + formatCurrency(line.amount, currency) + '</td>' +
@@ -459,10 +574,18 @@ function previewAllocation() {
       '</tr>';
     });
 
-    html += '<tr class="total-row"><td><strong>Total (excl. Owner Pay transfer)</strong></td><td></td>' +
+    // Expenses are billed but never allocated, so the allocation total only
+    // matches the invoice total when there are none. Say which it is rather
+    // than claiming they always agree.
+    var allocatedBase = (Number(stages.gross) || 0) + (Number(stages.gst) || 0);
+    html += '<tr class="total-row"><td colspan="2"><strong>Total (excl. Owner Pay transfer)</strong></td><td></td>' +
       '<td class="number"><strong>' + formatCurrency(data.total, currency) + '</strong></td>' +
-      '<td class="muted">equals the invoice total</td></tr>';
-    html += '</tbody></table>' +
+      '<td class="muted">billed hours + GST</td></tr>';
+    html += '</tbody></table></div>' +
+      '<p class="muted small" style="margin:0.4rem 0 0.5rem;">' +
+        'Allocating ' + formatCurrency(allocatedBase, currency) + ' of billed hours and GST. ' +
+        'Any expenses on this invoice are reimbursements and are deliberately left out.' +
+      '</p>' +
       '<div class="form-actions">' +
         '<button type="button" class="btn-primary" onclick="confirmAllocation()">Confirm allocation</button>' +
         '<button type="button" class="btn-subtle" onclick="document.getElementById(\'allocation-preview\').innerHTML=\'\'">Cancel</button>' +
@@ -473,13 +596,6 @@ function previewAllocation() {
   }).catch(function(err) {
     preview.innerHTML = '<p class="error">Error: ' + escapeHtml(err.message) + '</p>';
   });
-}
-
-function scopeLabel(scope) {
-  var reg = AppCache.budgetCategories;
-  var scopes = (reg && reg.scopes) || [];
-  var found = scopes.find(function(s) { return s.scope === scope; });
-  return found ? found.label : scope;
 }
 
 function confirmAllocation() {

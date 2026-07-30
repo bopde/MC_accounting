@@ -129,6 +129,42 @@ var LEGACY_LABEL_TO_KEY = (function() {
   return map;
 })();
 
+var COMPANY_LABEL_TO_KEY = (function() {
+  var map = {};
+  BUDGET_CATEGORY_DEFS.forEach(function(d) { map[d.label] = d.key; });
+  return map;
+})();
+
+/**
+ * Labels that only a company allocation can carry. Six labels are shared with
+ * the legacy set (Donate, Save, Invest, Spend, Tax Withheld, ACC Withheld), so
+ * a single row is ambiguous — but these are not, which lets a whole invoice's
+ * allocation set be classified with certainty. See migrateBudgetAllocations.
+ */
+var COMPANY_ONLY_LABELS = (function() {
+  var legacyLabels = LEGACY_CATEGORY_DEFS.map(function(d) { return d.label; });
+  return BUDGET_CATEGORY_DEFS.map(function(d) { return d.label; })
+    .filter(function(label) { return legacyLabels.indexOf(label) === -1; });
+})();
+
+function isCompanyOnlyLabel(label) {
+  return COMPANY_ONLY_LABELS.indexOf(String(label)) !== -1;
+}
+
+/**
+ * How each settlement mode is described and actioned. Kept here so the server
+ * and the UI cannot drift apart on the wording.
+ */
+var SETTLE_MODES = {
+  auto_paid: { key: 'auto_paid', groupLabel: 'Withheld at source', verb: '', settledWord: 'withheld' },
+  pay: { key: 'pay', groupLabel: 'Owed out', verb: 'Mark Paid', settledWord: 'paid' },
+  hold: { key: 'hold', groupLabel: 'Held back', verb: 'Mark Set Aside', settledWord: 'set aside' },
+  transfer: { key: 'transfer', groupLabel: 'To transfer', verb: 'Mark Transferred', settledWord: 'transferred' }
+};
+
+/** Order the settle groups are presented in within a pot. */
+var SETTLE_GROUP_ORDER = ['pay', 'hold', 'transfer', 'auto_paid'];
+
 var MODEL_COMPANY = 'company';
 var MODEL_SOLE_TRADER = 'sole_trader';
 
@@ -166,10 +202,29 @@ function pctFieldsForModel(model) {
 }
 
 /**
- * A rule with no model column predates the company split.
+ * Which cascade a rule's percentages belong to.
+ *
+ * A stored model wins. Failing that, a rule that predates the company split is
+ * identified by having actual legacy percentages: validateLegacyBudgetRule
+ * forces its distribution to sum to 100%, so a genuine sole-trader rule always
+ * has non-blank legacy fields. A rule with neither a model nor any legacy
+ * percentage was written by the company form onto a sheet that had no `model`
+ * column yet, so treat it as company — otherwise it is stranded in the legacy
+ * table and cannot be repaired through the UI.
  */
 function ruleModel(rule) {
-  return String((rule && rule.model) || '') === MODEL_COMPANY ? MODEL_COMPANY : MODEL_SOLE_TRADER;
+  var stored = String((rule && rule.model) || '');
+  if (stored === MODEL_COMPANY) return MODEL_COMPANY;
+  if (stored === MODEL_SOLE_TRADER) return MODEL_SOLE_TRADER;
+  return hasLegacyPercentages(rule) ? MODEL_SOLE_TRADER : MODEL_COMPANY;
+}
+
+function hasLegacyPercentages(rule) {
+  if (!rule) return false;
+  return LEGACY_CATEGORY_DEFS.some(function(d) {
+    if (!d.pctField) return false;
+    return (Number(rule[d.pctField]) || 0) !== 0;
+  });
 }
 
 /**
@@ -348,6 +403,8 @@ function getBudgetCategories() {
     categories: BUDGET_CATEGORY_DEFS,
     legacy: LEGACY_CATEGORY_DEFS,
     residualKey: PERSONAL_RESIDUAL_KEY,
+    settleModes: SETTLE_MODES,
+    settleGroupOrder: SETTLE_GROUP_ORDER,
     models: { company: MODEL_COMPANY, soleTrader: MODEL_SOLE_TRADER }
   };
 }

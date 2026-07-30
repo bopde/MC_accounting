@@ -43,7 +43,10 @@ function previewAllocationFromClient(params) {
 function updateAllocationStatusFromClient(params) {
   var parts = String(params).split('|');
   if (parts.length < 2) throw new Error('Invalid parameters');
-  return updateAllocationStatus(parts[0], parts[1], parts[2] || null, parts[3] || null);
+  // The note is free text and may itself contain '|' (e.g. "ASB 4471 | GST Q2"),
+  // so it takes everything after the third delimiter rather than one field.
+  var notes = parts.length > 3 ? parts.slice(3).join('|') : '';
+  return updateAllocationStatus(parts[0], parts[1], parts[2] || null, notes || null);
 }
 
 /**

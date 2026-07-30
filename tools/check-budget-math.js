@@ -306,6 +306,58 @@ check('legacy labels map back to legacy keys', function() {
   // A row with a key wins, so the new personal Spend is never confused with it.
   eq(app.resolveCategoryKey({ category: 'Spend', category_key: 'per_spend' }), 'per_spend', 'key wins');
 });
+check('company-only labels exclude the six shared with legacy', function() {
+  ['GST', 'Business Tax', 'Business ACC', 'Reserve', 'Owner Pay', 'Personal Tax', 'Personal ACC']
+    .forEach(function(label) {
+      eq(app.isCompanyOnlyLabel(label), true, label + ' is company-only');
+    });
+  // These labels are identical in both models, so they can never classify a row.
+  ['Donate', 'Save', 'Invest', 'Spend', 'Tax Withheld', 'ACC Withheld']
+    .forEach(function(label) {
+      eq(app.isCompanyOnlyLabel(label), false, label + ' is ambiguous');
+    });
+});
+
+check('company labels map to company keys', function() {
+  eq(app.COMPANY_LABEL_TO_KEY['Spend'], 'per_spend', 'Spend');
+  eq(app.COMPANY_LABEL_TO_KEY['Business Tax'], 'biz_tax', 'Business Tax');
+  eq(app.COMPANY_LABEL_TO_KEY['Owner Pay'], 'owner_pay', 'Owner Pay');
+  // Same label, different key per model — which is the whole reason
+  // migrateBudgetAllocations classifies per invoice rather than per row.
+  eq(app.LEGACY_LABEL_TO_KEY['Spend'], 'legacy_spend', 'legacy Spend');
+});
+
+check('every settle mode used by a category has metadata', function() {
+  app.allCategoryDefs().forEach(function(d) {
+    eq(!!app.SETTLE_MODES[d.settle], true, d.key + ' settle "' + d.settle + '"');
+  });
+  app.SETTLE_GROUP_ORDER.forEach(function(mode) {
+    eq(!!app.SETTLE_MODES[mode], true, 'ordered mode ' + mode);
+  });
+});
+
+section('Rule model inference');
+check('an explicit model always wins', function() {
+  eq(app.ruleModel({ model: 'company' }), 'company', 'company');
+  eq(app.ruleModel({ model: 'sole_trader', tax_to_pay_pct: 0.28 }), 'sole_trader', 'sole trader');
+});
+check('a real legacy rule with no model column reads as sole trader', function() {
+  eq(app.ruleModel(legacyRule), 'sole_trader', 'legacy rule');
+});
+check('a rule with no model and no legacy percentages reads as company', function() {
+  // This is the damaged shape: the company form wrote it to a sheet with no
+  // `model` column, so every percentage was dropped and the legacy columns
+  // stayed blank. Reading it as legacy would strand it un-editable.
+  eq(app.ruleModel({ name: 'Company Default', notes: '' }), 'company', 'blank rule');
+  eq(app.ruleModel({ tax_to_pay_pct: '', spend_pct: '' }), 'company', 'blank pct cells');
+});
+check('a genuine legacy rule can never look blank', function() {
+  // validateLegacyBudgetRule forces the distribution to 100%, so at least one
+  // legacy percentage is always non-zero — which is what makes the inference safe.
+  app.validateLegacyBudgetRule(legacyRule);
+  eq(app.hasLegacyPercentages(legacyRule), true, 'has legacy pcts');
+});
+
 check('company defaults form a valid rule', function() {
   const seeded = {};
   app.BUDGET_CATEGORY_DEFS.forEach(function(d) {

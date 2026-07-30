@@ -11,21 +11,50 @@ function getUninvoicedItemsInternal(businessId, dateFrom, dateTo, contractId) {
   var toStr = dateOnly(dateTo);
   var conIdStr = contractId ? String(contractId) : '';
 
+  var contract = conIdStr ? findById('Contracts', conIdStr) : null;
+  var conFrom = contract ? dateOnly(contract.date_from) : '';
+  var conTo = contract ? dateOnly(contract.date_to) : '';
+
+  /**
+   * A row with a contract must match the selected one. A row with NO contract
+   * counts towards it when the date falls inside the contract's period —
+   * matching how the dashboard already attributes unassigned work
+   * (DashboardService.contractProgress). Strict matching used to drop every
+   * entry logged before contracts existed, or left as "None".
+   */
+  function matchesContract(row, d) {
+    if (!conIdStr) return true;
+    var rowContract = row.contract_id ? String(row.contract_id) : '';
+    if (rowContract) return idsMatch(rowContract, conIdStr);
+    if (!d) return false;
+    if (conFrom && d < conFrom) return false;
+    if (conTo && d > conTo) return false;
+    return true;
+  }
+
+  /** Each bound guarded separately: `d > ''` is true, so an unset dateTo
+   *  would otherwise exclude every row instead of leaving the range open. */
+  function inDateRange(d) {
+    if (!d) return false;
+    if (fromStr && d < fromStr) return false;
+    if (toStr && d > toStr) return false;
+    return true;
+  }
+
   var timeEntries = getAll('TimeEntries').filter(function(te) {
     var d = dateOnly(te.date);
     if (!idsMatch(te.business_id, businessId)) return false;
     if (te.invoice_id && te.invoice_id !== '') return false;
-    if (d < fromStr || d > toStr) return false;
-    if (conIdStr && !idsMatch(te.contract_id || '', conIdStr)) return false;
-    return true;
+    if (!inDateRange(d)) return false;
+    return matchesContract(te, d);
   });
 
   var expenses = getAll('Expenses').filter(function(exp) {
     var d = dateOnly(exp.date);
     if (!idsMatch(exp.business_id, businessId)) return false;
     if (exp.invoice_id && exp.invoice_id !== '') return false;
-    if (d < fromStr || d > toStr) return false;
-    return true;
+    if (!inDateRange(d)) return false;
+    return matchesContract(exp, d);
   });
 
   return { timeEntries: timeEntries, expenses: expenses };
@@ -42,6 +71,16 @@ function getUninvoicedItemsInternal(businessId, dateFrom, dateTo, contractId) {
  * @returns {Object} The created invoice
  */
 function generateInvoice(params) {
+  // One lock across select-items -> write invoice -> stamp items. Without it,
+  // two submissions for the same business and period both see the same
+  // uninvoiced entries and bill them twice, and both can compute the same
+  // invoice ID.
+  return withScriptLock(function() {
+    return generateInvoiceLocked(params);
+  }, 60000);
+}
+
+function generateInvoiceLocked(params) {
   var items = getUninvoicedItemsInternal(params.businessId, params.dateFrom, params.dateTo, params.contractId);
 
   if (items.timeEntries.length === 0 && items.expenses.length === 0) {
@@ -90,26 +129,52 @@ function generateInvoice(params) {
     line_descriptions: params.lineDescriptions ? JSON.stringify(params.lineDescriptions) : ''
   });
 
-  // Mark time entries as invoiced (force text format to preserve leading zeros)
   var ss = getSpreadsheet();
-  var teSheet = ss.getSheetByName('TimeEntries');
-  var teInvCol = getColumnIndex(teSheet, 'invoice_id');
-  items.timeEntries.forEach(function(te) {
-    var cell = teSheet.getRange(te._rowIndex, teInvCol);
-    cell.setNumberFormat('@');
-    cell.setValue(invoice.invoice_id);
-  });
-
-  // Mark expenses as invoiced
-  var expSheet = ss.getSheetByName('Expenses');
-  var expInvCol = getColumnIndex(expSheet, 'invoice_id');
-  items.expenses.forEach(function(exp) {
-    var cell = expSheet.getRange(exp._rowIndex, expInvCol);
-    cell.setNumberFormat('@');
-    cell.setValue(invoice.invoice_id);
-  });
+  stampInvoiceId(ss.getSheetByName('TimeEntries'), items.timeEntries, invoice.invoice_id);
+  stampInvoiceId(ss.getSheetByName('Expenses'), items.expenses, invoice.invoice_id);
 
   return invoice;
+}
+
+/**
+ * Stamp invoice_id onto a set of rows.
+ *
+ * Batched into contiguous runs rather than two API calls per row: a 150-entry
+ * invoice used to make 300 calls, which pushed past the client's 45s timeout —
+ * and since a timeout is not a cancellation, the user would retry and get a
+ * second invoice covering whatever the first pass had not yet stamped.
+ *
+ * Text format is forced to preserve leading zeros in IDs like '0526'.
+ */
+function stampInvoiceId(sheet, rows, invoiceId) {
+  if (!sheet || !rows || rows.length === 0) return;
+
+  var col = getColumnIndex(sheet, 'invoice_id');
+  var indexes = rows.map(function(r) { return r._rowIndex; })
+    .filter(function(i) { return !!i; })
+    .sort(function(a, b) { return a - b; });
+  if (indexes.length === 0) return;
+
+  var runStart = indexes[0];
+  var runEnd = indexes[0];
+
+  var flush = function() {
+    var height = runEnd - runStart + 1;
+    var values = [];
+    for (var i = 0; i < height; i++) values.push([invoiceId]);
+    sheet.getRange(runStart, col, height, 1).setNumberFormat('@').setValues(values);
+  };
+
+  for (var i = 1; i < indexes.length; i++) {
+    if (indexes[i] === runEnd + 1) {
+      runEnd = indexes[i];
+    } else {
+      flush();
+      runStart = indexes[i];
+      runEnd = indexes[i];
+    }
+  }
+  flush();
 }
 
 /**
@@ -317,14 +382,7 @@ function updateInvoice(params) {
  * Accepts params object with dateFrom/dateTo, or a year string for backwards compat.
  */
 function getInvoicesWithDetails(params) {
-  var invoices;
-  if (typeof params === 'object' && params !== null && params.dateFrom) {
-    invoices = getByDateRange('Invoices', 'created_date', params.dateFrom, params.dateTo);
-  } else if (params) {
-    invoices = getByYear('Invoices', 'created_date', params);
-  } else {
-    invoices = getAll('Invoices');
-  }
+  var invoices = getByDateParams('Invoices', 'created_date', params);
   var businesses = getAll('Businesses');
   var bizMap = {};
   businesses.forEach(function(b) { bizMap[normalizeId(b.business_id)] = b; });
@@ -343,9 +401,10 @@ function getInvoicesWithDetails(params) {
  * Subsequent invoices in the same month get a letter suffix: 0526a, 0526b, etc.
  */
 function generateInvoiceId(dateTo) {
-  var lock = LockService.getScriptLock();
-  lock.waitLock(10000);
-  try {
+  // Re-entrant: generateInvoice already holds the lock across the scan and the
+  // write, which is what stops two submissions computing the same ID. Taking
+  // and releasing a separate lock here would leave that window open.
+  return withScriptLock(function() {
     var parts = String(dateTo).split('-');
     var mm = parts[1];
     var yy = parts[0].slice(-2);
@@ -360,7 +419,12 @@ function generateInvoiceId(dateTo) {
       var m = pattern.exec(String(inv.invoice_id));
       if (m) {
         count++;
-        if (m[1] > maxSuffix) maxSuffix = m[1];
+        // Compare by length first: plain '>' puts 'aa' below 'z', so once a
+        // month reached suffix 'z' every later invoice reused 'aa'.
+        if (m[1].length > maxSuffix.length ||
+            (m[1].length === maxSuffix.length && m[1] > maxSuffix)) {
+          maxSuffix = m[1];
+        }
       }
     });
 
@@ -369,9 +433,7 @@ function generateInvoiceId(dateTo) {
     // Next suffix after the highest existing one
     var nextChar = maxSuffix === '' ? 'a' : nextSuffix(maxSuffix);
     return base + nextChar;
-  } finally {
-    lock.releaseLock();
-  }
+  });
 }
 
 function nextSuffix(s) {

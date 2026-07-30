@@ -149,9 +149,9 @@ function previewAllocation(invoiceId, ruleId) {
  * Lines that come to zero are skipped — there is nothing to track.
  */
 function allocateBudget(invoiceId, ruleId) {
-  var lock = LockService.getScriptLock();
-  lock.waitLock(10000);
-  try {
+  // One lock for the whole check-then-write: the duplicate guard below is only
+  // meaningful if no other execution can slip between it and the appends.
+  return withScriptLock(function() {
     var invoice = findById('Invoices', invoiceId);
     if (!invoice) throw new Error('Invoice not found: ' + invoiceId);
 
@@ -196,9 +196,7 @@ function allocateBudget(invoiceId, ruleId) {
     updateRow('Invoices', invoice._rowIndex, invoice);
 
     return allocations;
-  } finally {
-    lock.releaseLock();
-  }
+  });
 }
 
 /**
@@ -236,21 +234,17 @@ function normaliseAllocationStatus(status) {
  * would double every personal dollar.
  */
 function getBudgetSummary(params) {
-  var invoices;
-  if (typeof params === 'object' && params !== null && params.dateFrom) {
-    invoices = getByDateRange('Invoices', 'created_date', params.dateFrom, params.dateTo);
-  } else if (params) {
-    invoices = getByYear('Invoices', 'created_date', params);
-  } else {
-    invoices = getAll('Invoices');
-  }
-  var invoiceIdList = invoices.map(function(inv) { return String(inv.invoice_id); });
+  var invoices = getByDateParams('Invoices', 'created_date', params);
+  var isFiltered = isFilteringParams(params);
+
+  // Normalise the invoice IDs into a map once: comparing every allocation
+  // against every invoice with idsMatch was O(n*m) string work.
+  var inRangeIds = {};
+  invoices.forEach(function(inv) { inRangeIds[normalizeId(inv.invoice_id)] = true; });
 
   var allAllocations = getAll('BudgetAllocations');
-  var allocations = params
-    ? allAllocations.filter(function(a) {
-        return invoiceIdList.some(function(id) { return idsMatch(a.invoice_id, id); });
-      })
+  var allocations = isFiltered
+    ? allAllocations.filter(function(a) { return !!inRangeIds[normalizeId(a.invoice_id)]; })
     : allAllocations;
   var businesses = getAll('Businesses');
 
