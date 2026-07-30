@@ -6,6 +6,42 @@
 var ALLOWED_CLIENT_SHEETS = ['Businesses', 'WorkCodes', 'Accounts', 'BudgetRules', 'BudgetAllocations', 'Contracts'];
 
 /**
+ * Run fn while holding the script lock, re-entrantly.
+ *
+ * Nesting matters here: an operation like allocateBudget must hold one lock
+ * across read-check-then-write, but it calls appendRow, which also wants the
+ * lock. Releasing on the inner exit would drop the outer function's protection
+ * and let two concurrent requests both pass the same "already exists?" check.
+ * Only the outermost call acquires and releases; inner calls just nest.
+ *
+ * A module-level counter is safe because an Apps Script execution is
+ * single-threaded — concurrency is across executions, which is exactly what the
+ * lock itself serialises.
+ */
+var _scriptLockDepth = 0;
+
+function withScriptLock(fn, timeoutMs) {
+  if (_scriptLockDepth > 0) {
+    _scriptLockDepth++;
+    try {
+      return fn();
+    } finally {
+      _scriptLockDepth--;
+    }
+  }
+
+  var lock = LockService.getScriptLock();
+  lock.waitLock(timeoutMs || 15000);
+  _scriptLockDepth++;
+  try {
+    return fn();
+  } finally {
+    _scriptLockDepth--;
+    lock.releaseLock();
+  }
+}
+
+/**
  * Sanitise a cell value to prevent formula injection.
  * Prefixes a leading single-quote when the value starts with =, +, -, or @.
  */
@@ -83,31 +119,55 @@ function getActive(sheetName) {
 }
 
 /**
+ * Rows are built from the SHEET's headers, so any key in `data` without a
+ * matching column would be dropped silently — which is how a whole set of
+ * budget percentages once disappeared without an error. Fail loudly instead.
+ *
+ * The usual cause is a schema addition that has not been migrated yet, so the
+ * message says exactly what to do about it.
+ */
+function assertKnownColumns(sheetName, headers, data) {
+  var unknown = Object.keys(data).filter(function(key) {
+    return key !== '_rowIndex' && headers.indexOf(key) === -1;
+  });
+  if (unknown.length === 0) return;
+
+  throw new Error("Sheet '" + sheetName + "' has no column(s): " + unknown.join(', ') +
+    '. Run setupSheets() from the Apps Script editor (or Finance Tracker > Run setup / migrations ' +
+    'in the spreadsheet menu) to add them, then try again.');
+}
+
+/**
  * Append a row to a sheet. Returns the new row data with generated ID.
  */
 function appendRow(sheetName, data) {
-  var ss = getSpreadsheet();
-  var sheet = ss.getSheetByName(sheetName);
-  if (!sheet) throw new Error('Sheet not found: ' + sheetName);
+  // The ID scan and the write must be one atomic step, or two executions hand
+  // out the same ID. Re-entrant, so callers already holding the lock keep it.
+  return withScriptLock(function() {
+    var ss = getSpreadsheet();
+    var sheet = ss.getSheetByName(sheetName);
+    if (!sheet) throw new Error('Sheet not found: ' + sheetName);
 
-  var headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+    var headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+    assertKnownColumns(sheetName, headers, data);
 
-  // Generate ID if the first column is an ID field and not provided
-  var idField = headers[0];
-  if (idField.indexOf('_id') !== -1 && !data[idField]) {
-    data[idField] = generateId(sheetName);
-  }
+    // Generate ID if the first column is an ID field and not provided
+    var idField = headers[0];
+    if (idField.indexOf('_id') !== -1 && !data[idField]) {
+      data[idField] = nextId(sheetName);
+    }
 
-  var row = headers.map(function(h) {
-    return sanitiseCell(data[h] !== undefined ? data[h] : '');
+    var row = headers.map(function(h) {
+      return sanitiseCell(data[h] !== undefined ? data[h] : '');
+    });
+
+    var newRow = sheet.getLastRow() + 1;
+    sheet.getRange(newRow, 1).setNumberFormat('@');
+    sheet.getRange(newRow, 1, 1, row.length).setValues([row]);
+    data._rowIndex = newRow;
+
+    return data;
   });
-
-  var newRow = sheet.getLastRow() + 1;
-  sheet.getRange(newRow, 1).setNumberFormat('@');
-  sheet.getRange(newRow, 1, 1, row.length).setValues([row]);
-  data._rowIndex = newRow;
-
-  return data;
 }
 
 /**
@@ -119,6 +179,8 @@ function updateRow(sheetName, rowIndex, data) {
   if (!sheet) throw new Error('Sheet not found: ' + sheetName);
 
   var headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  assertKnownColumns(sheetName, headers, data);
+
   var row = headers.map(function(h) {
     return sanitiseCell(data[h] !== undefined ? data[h] : '');
   });
@@ -208,6 +270,35 @@ function getByDateRange(sheetName, dateColumn, dateFrom, dateTo) {
     if (toStr && d > toStr) return false;
     return true;
   });
+}
+
+/**
+ * Resolve the flexible date filter a client may send:
+ *   {dateFrom, dateTo} -> range, either bound blank meaning unbounded
+ *   '2026'             -> that year
+ *   falsy              -> everything
+ *
+ * Clearing the From box used to send {dateFrom:'', dateTo:'...'}, which fell
+ * through to the year branch and built the prefix '[object Object]-' — matching
+ * nothing, so the page reported no data at all.
+ */
+function getByDateParams(sheetName, dateColumn, params) {
+  if (typeof params === 'object' && params !== null) {
+    if (!params.dateFrom && !params.dateTo) return getAll(sheetName);
+    return getByDateRange(sheetName, dateColumn, params.dateFrom, params.dateTo);
+  }
+  if (params) return getByYear(sheetName, dateColumn, params);
+  return getAll(sheetName);
+}
+
+/**
+ * Whether the given filter params actually narrow anything.
+ */
+function isFilteringParams(params) {
+  if (typeof params === 'object' && params !== null) {
+    return !!(params.dateFrom || params.dateTo);
+  }
+  return !!params;
 }
 
 /**

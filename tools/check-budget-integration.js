@@ -69,6 +69,23 @@ Object.assign(app, {
   LockService: {
     getScriptLock: function() { return { waitLock: function() {}, releaseLock: function() {} }; }
   },
+  // Real implementation lives in SheetService.gs, which is not loaded here
+  // because it is all Google API calls. Single-threaded, so pass-through.
+  withScriptLock: function(fn) { return fn(); },
+  getByDateParams: function(name, col, params) {
+    if (typeof params === 'object' && params !== null) {
+      if (!params.dateFrom && !params.dateTo) return app.getAll(name);
+      return app.getByDateRange(name, col, params.dateFrom, params.dateTo);
+    }
+    if (params) return app.getByYear(name, col, params);
+    return app.getAll(name);
+  },
+  isFilteringParams: function(params) {
+    if (typeof params === 'object' && params !== null) {
+      return !!(params.dateFrom || params.dateTo);
+    }
+    return !!params;
+  },
   getAll: function(name) {
     return (db[name] || []).map(function(r) { return Object.assign({}, r); });
   },

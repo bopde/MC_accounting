@@ -14,20 +14,46 @@ function bootstrap() {
     budgetRules: [],
     budgetCategories: null,
     contracts: [],
-    myDetails: {}
+    myDetails: {},
+    schemaWarnings: [],
+    errors: []
   };
-  try { result.budgetCategories = getBudgetCategories(); } catch (e) {}
-  try { result.businesses = getActive('Businesses'); } catch (e) {}
-  try { result.workCodes = getActive('WorkCodes'); } catch (e) {}
-  try { result.accounts = getActive('Accounts'); } catch (e) {}
-  try {
-    result.budgetRules = getAll('BudgetRules').filter(function(r) {
-      return r.active === true || r.active === 'TRUE' || r.active === 'true' || r.active === '' || r.active === undefined;
-    });
-  } catch (e) {}
-  try { result.contracts = getActiveContracts(); } catch (e) {}
-  try { result.myDetails = getMyDetails(); } catch (e) { result.myDetails = {}; }
+
+  // Each section is isolated so one broken sheet cannot blank the whole app —
+  // but the reason is reported rather than swallowed, otherwise a missing sheet
+  // renders as a cheerful "nothing configured yet".
+  function section(name, fn, assign) {
+    try {
+      assign(fn());
+    } catch (e) {
+      result.errors.push(name + ': ' + (e && e.message ? e.message : String(e)));
+    }
+  }
+
+  section('budgetCategories', getBudgetCategories, function(v) { result.budgetCategories = v; });
+  section('businesses', function() { return getActive('Businesses'); }, function(v) { result.businesses = v; });
+  section('workCodes', function() { return getActive('WorkCodes'); }, function(v) { result.workCodes = v; });
+  section('accounts', function() { return getActive('Accounts'); }, function(v) { result.accounts = v; });
+  section('budgetRules', function() { return getActiveRules(); }, function(v) { result.budgetRules = v; });
+  section('contracts', getActiveContracts, function(v) { result.contracts = v; });
+  section('myDetails', getMyDetails, function(v) { result.myDetails = v || {}; });
+  section('schema', checkSchema, function(v) { result.schemaWarnings = v || []; });
+
   return result;
+}
+
+/**
+ * Budget rules the UI should offer.
+ *
+ * `active` was added to this sheet by a later migration, so rules created
+ * before it exists have a blank cell. getActive() would treat that as inactive
+ * and hide them; here a blank means active. Kept in one function so the two
+ * readings cannot drift — see getBudgetRules() for the unfiltered list.
+ */
+function getActiveRules() {
+  return getAll('BudgetRules').filter(function(r) {
+    return isTruthy(r.active) || r.active === '' || r.active === undefined || r.active === null;
+  });
 }
 
 // --- Businesses ---

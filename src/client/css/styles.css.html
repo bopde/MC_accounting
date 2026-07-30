@@ -335,6 +335,62 @@
   .filters select, .filters input { margin-bottom: 0; min-height: 44px; }
   .filters button { width: auto; min-height: 44px; padding: 0.4rem 0.75rem; }
 
+  /* ---- Schema / error banner ---- */
+  .app-banner {
+    display: flex; gap: 1rem; align-items: flex-start; justify-content: space-between;
+    padding: 0.7rem 0.9rem; margin: 0.75rem 0; border-radius: 4px;
+    font-size: 0.85rem; line-height: 1.45;
+    background: var(--warn-bg); border-left: 3px solid var(--warn);
+  }
+  .app-banner hr { margin: 0.4rem 0; border: 0; border-top: 1px solid var(--rule-2); }
+  .app-banner code { font-size: 0.8rem; }
+  .app-banner button { flex: 0 0 auto; }
+
+  /* ---- Money flow strip: income -> business -> owner pay -> personal ---- */
+  .flow-strip {
+    display: flex; align-items: stretch; gap: 0.5rem; flex-wrap: wrap;
+    padding: 0.6rem 0; border-bottom: 1px dashed var(--rule);
+  }
+  .flow-step { display: flex; flex-direction: column; gap: 0.1rem; flex: 1 1 9rem; min-width: 8rem; }
+  .flow-step__label {
+    font-size: 0.68rem; color: var(--muted); text-transform: uppercase;
+    letter-spacing: 0.08em; font-weight: 500;
+  }
+  .flow-step__value {
+    font-family: var(--font-display); font-size: 1.35rem; font-weight: 300;
+    color: var(--ocean); line-height: 1.15;
+  }
+  .flow-step__detail { font-size: 0.72rem; color: var(--muted); }
+  .flow-strip__arrow { align-self: center; color: var(--rule); font-size: 1.1rem; }
+
+  /* ---- Pot cards: business vs personal ---- */
+  .pot-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin: 1rem 0 1.5rem; }
+  .pot-card { border: 1px solid var(--rule); border-radius: 4px; padding: 0.8rem 0.9rem; margin: 0; }
+  .pot-card__header {
+    display: flex; align-items: baseline; justify-content: space-between; gap: 0.75rem;
+    padding-bottom: 0.5rem; margin-bottom: 0.4rem; border-bottom: 1px solid var(--rule-2);
+  }
+  .pot-card__header h3 { margin: 0; font-size: 1.05rem; }
+  .pot-card__headline { display: flex; flex-direction: column; align-items: flex-end; }
+  .pot-card__amount {
+    font-family: var(--font-display); font-size: 1.3rem; font-weight: 300;
+    color: var(--ocean); line-height: 1.1;
+  }
+  .pot-card__table { margin: 0; }
+  .pot-card__table td { border-bottom: 1px solid var(--rule-2); }
+  .pot-card__table tbody tr:last-child td { border-bottom: 0; }
+
+  /* Pot chips in the shared action list */
+  .pot-tag {
+    display: inline-block; padding: 0.05rem 0.4rem; border-radius: 3px;
+    font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.06em; white-space: nowrap;
+  }
+  .pot-tag--business { background: var(--cream); border: 1px solid var(--sage); color: var(--ocean); }
+  .pot-tag--personal { background: var(--cream); border: 1px solid var(--rule); color: var(--ocean); }
+  .pot-tag--bridge, .pot-tag--legacy { background: transparent; border: 1px solid var(--rule-2); color: var(--muted); }
+
+  details.flow-group > summary { cursor: pointer; }
+
   /* ---- Money flow tiles ---- */
   .flow-overview {
     display: grid;
@@ -690,6 +746,9 @@
     .invoice-meta { text-align: left; }
     .flow-overview { grid-template-columns: 1fr; }
     .flow-grid { grid-template-columns: 1fr; }
+    .pot-grid { grid-template-columns: 1fr; }
+    .flow-strip { flex-direction: column; }
+    .flow-strip__arrow { display: none; }
     .dash-columns { grid-template-columns: 1fr; }
     .dash-budget-grid { grid-template-columns: 1fr; }
     table { font-size: 0.8rem; }
