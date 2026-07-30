@@ -215,6 +215,88 @@ assert(r2(personalScope.categories.reduce(function(s, c) { return s + c.allocate
 assert(personalScope.categories.every(function(c) { return c.settle && c.key; }),
   'every summary category carries settle + key for the UI');
 
+// --- The Budget page's four sections must reconcile ---
+
+console.log('\nMoney Flow reconciliation');
+
+// Same key groupings the page uses (src/client/js/budget.js.html).
+const BIZ_OBLIGATION_KEYS = ['biz_tax', 'biz_gst', 'legacy_gst', 'biz_acc'];
+const PER_OBLIGATION_KEYS = ['per_tax', 'legacy_tax', 'per_acc', 'legacy_acc'];
+const DISTRIBUTION_KEYS = ['per_save', 'legacy_save', 'per_donate', 'legacy_donate',
+  'per_invest', 'legacy_invest', 'per_spend', 'legacy_spend'];
+const WITHHELD_KEYS = ['legacy_tax_withheld', 'legacy_acc_withheld',
+  'biz_tax_withheld', 'biz_acc_withheld'];
+
+function catMap(sum) {
+  const map = {};
+  (sum.scopes || []).forEach(function(g) {
+    (g.categories || []).forEach(function(c) { map[c.key] = c; });
+  });
+  return map;
+}
+
+function sumKeys(map, keys) {
+  return r2(keys.reduce(function(s, k) { return s + ((map[k] || {}).allocated || 0); }, 0));
+}
+
+function revenue(sum, wantLegacy) {
+  let total = 0;
+  (sum.scopes || []).forEach(function(g) {
+    if ((g.scope === 'legacy') !== wantLegacy) return;
+    (g.categories || []).forEach(function(c) {
+      if (!c.isTransfer) total += c.allocated;
+    });
+  });
+  return r2(total);
+}
+
+const flow = app.getBudgetSummary(RANGE);
+const map = catMap(flow);
+
+const businessRevenue = revenue(flow, false);
+const soleTraderRevenue = revenue(flow, true);
+const totalRevenue = r2(businessRevenue + soleTraderRevenue);
+const totalObligations = r2(sumKeys(map, BIZ_OBLIGATION_KEYS) + sumKeys(map, PER_OBLIGATION_KEYS));
+const reserve = sumKeys(map, ['biz_reserve']);
+const personalPot = sumKeys(map, DISTRIBUTION_KEYS);
+const withheld = sumKeys(map, WITHHELD_KEYS);
+
+console.log('    revenue ' + totalRevenue + ' (business ' + businessRevenue +
+  ', sole trader ' + soleTraderRevenue + ')');
+console.log('    obligations ' + totalObligations + ', reserve ' + reserve +
+  ', personal pot ' + personalPot + ', withheld ' + withheld);
+
+assert(totalRevenue === r2(flow.totals.allocated),
+  'Header 1 boxes sum to the server total, got ' + totalRevenue + ' vs ' + flow.totals.allocated);
+// Header 1 - Header 2 = Header 3 (+ any money withheld at source, shown in Header 4).
+assert(r2(totalRevenue - totalObligations) === r2(reserve + personalPot + withheld),
+  'revenue - obligations = reserve + personal pot + withheld, got ' +
+  r2(totalRevenue - totalObligations) + ' vs ' + r2(reserve + personalPot + withheld));
+// Header 4's four buckets must cover every distributable personal category the
+// server returns. Catches a bucket being added to the registry but not the page.
+const flowPersonal = (flow.scopes || []).find(function(g) { return g.scope === 'personal'; });
+const distributable = (flowPersonal.categories || [])
+  .filter(function(c) { return c.group === 'personal_distribution'; })
+  .map(function(c) { return c.key; });
+const uncovered = distributable.filter(function(k) { return DISTRIBUTION_KEYS.indexOf(k) === -1; });
+assert(uncovered.length === 0,
+  'every distributable bucket appears in Header 4' +
+  (uncovered.length ? ' — missing ' + uncovered.join(', ') : ''));
+assert(personalPot === r2((flowPersonal.categories || [])
+  .filter(function(c) { return c.group === 'personal_distribution'; })
+  .reduce(function(s, c) { return s + c.allocated; }, 0) +
+  sumKeys(map, ['legacy_save', 'legacy_donate', 'legacy_invest', 'legacy_spend'])),
+  'personal pot equals the distributable buckets plus their legacy counterparts');
+
+// Owner Pay must be excluded from revenue, not merely reported alongside it.
+const naiveRevenue = r2((flow.scopes || []).reduce(function(s, g) {
+  return s + (g.categories || []).reduce(function(t, c) { return t + c.allocated; }, 0);
+}, 0));
+assert(r2(flow.bridge.allocated) > 0, 'fixture actually has an Owner Pay draw');
+assert(r2(naiveRevenue - totalRevenue) === r2(flow.bridge.allocated),
+  'excluding transfers removes exactly the Owner Pay amount, got ' +
+  r2(naiveRevenue - totalRevenue) + ' vs ' + r2(flow.bridge.allocated));
+
 // --- Settling ---
 
 console.log('\nSettling');
