@@ -463,7 +463,16 @@ function generateInvoiceId(dateTo, businessId) {
   // write, which is what stops two submissions computing the same ID. Taking
   // and releasing a separate lock here would leave that window open.
   return withScriptLock(function() {
-    var parts = String(dateTo).split('-');
+    // Normalise first: a Date object or a malformed string used to slice into
+    // nonsense, producing ids like "ATundefined" — or, when the value contained
+    // a bracket, an unmatched-paren error from the pattern built below.
+    var iso = dateOnly(dateTo);
+    if (!iso) {
+      throw new Error('Cannot generate an invoice number: "' + dateTo +
+        '" is not a valid period end date. Expected YYYY-MM-DD.');
+    }
+
+    var parts = iso.split('-');
     var mm = parts[1];
     var yy = parts[0].slice(-2);
     var base = mm + yy;

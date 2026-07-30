@@ -44,6 +44,19 @@ const businesses = [
 
 Object.assign(srv, {
   withScriptLock: function(fn) { return fn(); },
+  // Real implementation is in SheetService.gs, which is not loaded here.
+  dateOnly: function(val) {
+    if (!val) return '';
+    if (val instanceof Date) {
+      var y = val.getFullYear();
+      var m = String(val.getMonth() + 1).padStart(2, '0');
+      var d = String(val.getDate()).padStart(2, '0');
+      return y + '-' + m + '-' + d;
+    }
+    var s = String(val);
+    var match = s.match(/^(\d{4}-\d{2}-\d{2})/);
+    return match ? match[1] : '';
+  },
   getAll: function(n) { return n === 'Invoices' ? invoices.slice() : []; },
   findById: function(n, id) {
     if (n !== 'Businesses') return null;
@@ -82,6 +95,15 @@ function eq(actual, expected, msg) {
   if (actual !== expected) {
     throw new Error((msg ? msg + ': ' : '') + 'expected ' + JSON.stringify(expected) +
       ', got ' + JSON.stringify(actual));
+  }
+}
+
+function throws(fn, fragment) {
+  let threw = null;
+  try { fn(); } catch (e) { threw = e; }
+  if (!threw) throw new Error('expected a throw, got none');
+  if (fragment && threw.message.indexOf(fragment) === -1) {
+    throw new Error('expected message containing "' + fragment + '", got "' + threw.message + '"');
   }
 }
 
@@ -157,6 +179,22 @@ check('a prefix is not confused with another business', function() {
   // Auckland Transport's sequence.
   eq(srv.generateInvoiceId('2026-05-31', 'BIZ-001'), 'AT0526a');
   eq(srv.generateInvoiceId('2026-05-31', 'BIZ-006'), 'ATC0526a');
+});
+
+console.log('\nBad period end dates');
+check('a Date object is accepted', function() {
+  invoices = [];
+  eq(srv.generateInvoiceId(new Date(2026, 4, 31), 'BIZ-001'), 'AT0526');
+});
+check('an ISO timestamp is accepted', function() {
+  invoices = [];
+  eq(srv.generateInvoiceId('2026-05-31T00:00:00', 'BIZ-001'), 'AT0526');
+});
+['', null, undefined, 'not-a-date', '31/05/2026'].forEach(function(bad) {
+  check('rejects ' + JSON.stringify(bad) + ' instead of inventing an id', function() {
+    invoices = [];
+    throws(function() { srv.generateInvoiceId(bad, 'BIZ-001'); }, 'not a valid period end date');
+  });
 });
 
 console.log('\nSuffix rollover');
