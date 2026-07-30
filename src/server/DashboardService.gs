@@ -88,16 +88,18 @@ function getDashboardData(params) {
     inv.allocated = !!allocatedInvIds[normalizeId(inv.invoice_id)];
   });
 
-  // Owner Pay is a transfer between your own accounts, not a bucket of money —
-  // including it would double-count every personal dollar.
-  var budget = allCategoryDefs().filter(function(def) {
-    return !def.isTransfer;
-  }).map(function(def) {
+  // Every bucket, including the Owner Pay transfer — the client needs the draw
+  // to work out personal revenue, and `isTransfer` tells it to keep that money
+  // out of any total where counting it twice would matter.
+  var budget = allCategoryDefs().map(function(def) {
     var d = allocByKey[def.key] || { allocated: 0, paid: 0, outstanding: 0 };
     return {
       category: def.label,
       key: def.key,
       scope: def.scope,
+      group: def.group,
+      settle: def.settle,
+      isTransfer: !!def.isTransfer,
       allocated: d.allocated,
       paid: d.paid,
       outstanding: d.outstanding

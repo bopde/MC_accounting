@@ -78,6 +78,40 @@ function allocationScopeLabel(scope) {
 }
 
 /**
+ * How the registry's buckets are grouped for display. Shared by the Budget page
+ * and the Dashboard so the two cannot drift — and declared here, in the first
+ * file the page includes, rather than in one screen's module: dashboard.js is
+ * included BEFORE budget.js, so a grouping owned by budget.js would be a
+ * load-order accident waiting to break.
+ *
+ * `keys` are registry category keys; where a company bucket has a sole-trader
+ * counterpart both are listed so they merge into one figure, and `legacyKeys`
+ * names the sole-trader part so the UI can call it out.
+ */
+var BIZ_OBLIGATIONS = [
+  { label: 'Tax to pay', keys: ['biz_tax'] },
+  // GST registration began with the company, so there is no sole-trader GST —
+  // but fold legacy_gst in rather than silently dropping a row that does exist.
+  { label: 'GST to pay', keys: ['biz_gst', 'legacy_gst'], legacyKeys: ['legacy_gst'] },
+  { label: 'ACC to pay', keys: ['biz_acc'] }
+];
+
+var PERSONAL_OBLIGATIONS = [
+  { label: 'Tax to pay', keys: ['per_tax', 'legacy_tax'], legacyKeys: ['legacy_tax'] },
+  { label: 'ACC to pay', keys: ['per_acc', 'legacy_acc'], legacyKeys: ['legacy_acc'] }
+];
+
+// Displayed in this order, each merging its company and sole-trader bucket.
+var PERSONAL_ALLOCATIONS = [
+  { label: 'Save', settle: 'hold', keys: ['per_save', 'legacy_save'] },
+  { label: 'Donate', settle: 'pay', keys: ['per_donate', 'legacy_donate'] },
+  { label: 'Invest', settle: 'hold', keys: ['per_invest', 'legacy_invest'] },
+  { label: 'Spend', settle: 'transfer', keys: ['per_spend', 'legacy_spend'] }
+];
+
+var WITHHELD_KEYS = ['legacy_tax_withheld', 'legacy_acc_withheld', 'biz_tax_withheld', 'biz_acc_withheld'];
+
+/**
  * Sheets hands booleans back as true, 'TRUE' or 'true' depending on how the
  * cell was written.
  */

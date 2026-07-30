@@ -64,7 +64,24 @@ function addBusiness(data) {
   }
   data.active = true;
   if (!data.currency) data.currency = 'NZD';
+
+  // Only send invoice_code when there is one. Writes reject unknown columns, so
+  // including a blank would make every "Add Business" fail on a spreadsheet
+  // that has not been migrated yet — while a code the user actually typed
+  // SHOULD fail loudly rather than vanish.
+  var code = normaliseInvoicePrefix(data.invoice_code);
+  if (code) data.invoice_code = code;
+  else delete data.invoice_code;
+
   return appendRow('Businesses', data);
+}
+
+/**
+ * The invoice-ID prefix a business will actually use, so the UI can show it
+ * before any invoice exists. Blank invoice_code means "derive from the name".
+ */
+function previewInvoicePrefix(data) {
+  return businessInvoicePrefix(data || {});
 }
 
 function updateBusiness(data) {
@@ -77,13 +94,35 @@ function updateBusiness(data) {
   if (data.default_rate !== undefined) biz.default_rate = Number(data.default_rate) || 0;
   if (data.currency !== undefined) biz.currency = data.currency;
   if (data.address !== undefined) biz.address = data.address;
+  if (data.invoice_code !== undefined) {
+    var code = normaliseInvoicePrefix(data.invoice_code);
+    // Assign only when there is a code to store, or when the row already has
+    // the column — otherwise clearing the field on an unmigrated sheet would
+    // add an unknown key and trip the write guard for no gain.
+    if (code || Object.prototype.hasOwnProperty.call(biz, 'invoice_code')) {
+      biz.invoice_code = code;
+    }
+  }
 
   updateRow('Businesses', biz._rowIndex, biz);
   return biz;
 }
 
+/**
+ * All businesses, each annotated with the invoice prefix it will actually use.
+ *
+ * Resolved server-side so the UI never has to re-implement the derivation rule
+ * and drift from businessInvoicePrefix():
+ *   invoice_prefix      — what invoices will actually carry
+ *   invoice_prefix_auto — what the name alone would give, for the placeholder
+ *                         that shows what clearing the override would do
+ */
 function getAllBusinesses() {
-  return getAll('Businesses');
+  return getAll('Businesses').map(function(b) {
+    b.invoice_prefix = businessInvoicePrefix(b);
+    b.invoice_prefix_auto = businessInvoicePrefix({ name: b.name });
+    return b;
+  });
 }
 
 // --- Work Codes ---

@@ -23,7 +23,10 @@ function showSettingsTab(tab) {
   var btns = document.querySelectorAll('#settings-tabs button');
   btns.forEach(function(btn) { btn.classList.remove('active'); });
   var labels = { mydetails: 0, businesses: 1, contracts: 2, codes: 3, accounts: 4, rules: 5 };
-  btns[labels[tab]].classList.add('active');
+  // Guarded: an unknown tab name, or being called before the tab bar exists,
+  // would otherwise throw here and leave the page blank with no explanation.
+  var active = btns[labels[tab]];
+  if (active) active.classList.add('active');
 
   var renderers = {
     mydetails: renderMyDetailsSettings,
@@ -111,21 +114,29 @@ function renderBusinessSettings() {
           '<label>Currency <select id="biz-currency">' + currencyOptions + '</select></label>' +
         '</div>' +
         '<label>Address <textarea id="biz-address" rows="2"></textarea></label>' +
+        '<div class="form-row">' +
+          '<label>Invoice Code <input type="text" id="biz-code" maxlength="6" placeholder="auto from name, e.g. AT">' +
+            '<small class="muted">Prefixes invoice numbers, e.g. AT0526. Leave blank to use the initials of the name.</small>' +
+          '</label>' +
+        '</div>' +
         '<div class="form-actions"><button type="submit">Add Business</button></div>' +
       '</form></div></details>' +
       '<div id="biz-edit-area"></div>';
 
     if (businesses.length > 0) {
       html += '<table><thead><tr>' +
-        '<th>Name</th><th>Contact</th><th>Email</th>' +
+        '<th>Name</th><th>Code</th><th>Contact</th><th>Email</th>' +
         '<th class="number">Rate</th><th>Currency</th><th></th>' +
         '</tr></thead><tbody>';
 
       businesses.forEach(function(b) {
         var isActive = b.active === true || b.active === 'TRUE' || b.active === 'true';
         var cur = b.currency || 'NZD';
+        var code = b.invoice_prefix || '';
         html += '<tr style="' + (isActive ? '' : 'opacity:0.5;') + '">' +
           '<td><strong>' + escapeHtml(b.name) + '</strong></td>' +
+          '<td><code>' + escapeHtml(code || '—') + '</code>' +
+            (b.invoice_code ? '' : ' <span class="muted small">auto</span>') + '</td>' +
           '<td>' + escapeHtml(b.contact_name) + '</td>' +
           '<td>' + escapeHtml(b.email) + '</td>' +
           '<td class="number">' + formatCurrency(b.default_rate, cur) + '</td>' +
@@ -178,6 +189,11 @@ function editBusiness(bizId) {
             '<label>Currency <select id="ebiz-currency">' + curOpts + '</select></label>' +
           '</div>' +
           '<label>Address <textarea id="ebiz-address" rows="2">' + escapeHtml(b.address || '') + '</textarea></label>' +
+          '<div class="form-row">' +
+            '<label>Invoice Code <input type="text" id="ebiz-code" maxlength="6" value="' + escapeHtml(b.invoice_code || '') + '" placeholder="' + escapeHtml(b.invoice_prefix_auto || '') + '">' +
+              '<small class="muted">Prefixes invoice numbers, e.g. ' + escapeHtml(b.invoice_prefix || 'AT') + '0526. Blank uses the initials of the name.</small>' +
+            '</label>' +
+          '</div>' +
           '<div class="form-actions">' +
             '<button type="submit">Save</button>' +
             '<button type="button" class="btn-subtle" onclick="document.getElementById(\'biz-edit-area\').innerHTML=\'\'">Cancel</button>' +
@@ -197,7 +213,8 @@ function saveBusiness(event, bizId) {
     email: document.getElementById('ebiz-email').value,
     default_rate: Number(document.getElementById('ebiz-rate').value) || 0,
     currency: document.getElementById('ebiz-currency').value || 'NZD',
-    address: document.getElementById('ebiz-address').value
+    address: document.getElementById('ebiz-address').value,
+    invoice_code: document.getElementById('ebiz-code').value
   };
 
   serverCall('updateBusiness', data).then(function() {
@@ -216,7 +233,8 @@ function submitBusiness(event) {
     email: document.getElementById('biz-email').value,
     default_rate: Number(document.getElementById('biz-rate').value) || 0,
     currency: document.getElementById('biz-currency').value || 'NZD',
-    address: document.getElementById('biz-address').value
+    address: document.getElementById('biz-address').value,
+    invoice_code: document.getElementById('biz-code').value
   };
 
   serverCall('addBusiness', data).then(function() {

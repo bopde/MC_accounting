@@ -423,43 +423,102 @@ function dashContracts(contracts) {
   return html;
 }
 
+/**
+ * Budget summary for the dashboard: revenue, obligations, personal allocations.
+ *
+ * The bucket groupings come from the Budget page's own constants
+ * (BIZ_OBLIGATIONS, PERSONAL_OBLIGATIONS, PERSONAL_ALLOCATIONS in
+ * budget.js.html) — every client file is inlined into one page, so they are
+ * shared globals. Duplicating the key lists here is how the two screens would
+ * drift apart.
+ */
 function dashBudget(budget) {
-  var html = '<article><header><h3 style="margin:0;">Budget Status</h3></header>';
+  var by = {};
+  (budget || []).forEach(function(cat) { by[cat.key] = cat; });
 
-  // Grouped by scope so business obligations never read as personal money.
-  var scopes = (AppCache.budgetCategories && AppCache.budgetCategories.scopes) || [];
-  var order = scopes.map(function(s) { return s.scope; });
-  var seen = {};
-  budget.forEach(function(cat) { seen[cat.scope] = true; });
-
-  order.filter(function(scope) { return seen[scope]; }).forEach(function(scope) {
-    var label = (scopes.find(function(s) { return s.scope === scope; }) || {}).label || scope;
-    html += '<h4 class="muted small" style="margin:0.6rem 0 0.35rem;text-transform:uppercase;letter-spacing:0.08em;">' +
-      escapeHtml(label) + '</h4><div class="dash-budget-grid">';
-
-    budget.filter(function(cat) { return cat.scope === scope; }).forEach(function(cat) {
-      var pct = cat.allocated > 0 ? Math.round(cat.paid / cat.allocated * 100) : 0;
-      html += '<div class="dash-budget-item">' +
-        '<div class="dash-budget-item__header">' +
-          '<span>' + escapeHtml(cat.category) + '</span>' +
-          '<span class="muted">' + formatCurrency(cat.allocated) + '</span>' +
-        '</div>' +
-        '<div style="height:8px;background:var(--rule-2);border-radius:4px;overflow:hidden;margin-bottom:0.6rem;">' +
-          '<div style="height:100%;width:' + pct + '%;background:var(--fern);border-radius:4px;transition:width 0.3s;"></div>' +
-        '</div>' +
-        '<div class="dash-budget-item__detail">' +
-          '<span>Paid ' + formatCurrency(cat.paid) + '</span>' +
-          (cat.outstanding > 0
-            ? '<span style="color:var(--warn);">Owe ' + formatCurrency(cat.outstanding) + '</span>'
-            : '<span style="color:var(--sage);">Complete</span>') +
-        '</div>' +
-      '</div>';
+  function sum(keys) {
+    var out = { allocated: 0, paid: 0, outstanding: 0 };
+    keys.forEach(function(k) {
+      var c = by[k];
+      if (!c) return;
+      out.allocated += c.allocated;
+      out.paid += c.paid;
+      out.outstanding += c.outstanding;
     });
+    return out;
+  }
 
-    html += '</div>';
+  function keysOf(rows) {
+    var keys = [];
+    rows.forEach(function(row) { keys = keys.concat(row.keys); });
+    return keys;
+  }
+
+  // Revenue, from each side. These OVERLAP by the owner pay draw — the company
+  // invoiced it and then paid it out — so they are never added together.
+  var businessRevenue = 0;
+  var soleTraderRevenue = 0;
+  (budget || []).forEach(function(cat) {
+    if (cat.isTransfer) return;
+    if (cat.scope === 'legacy') soleTraderRevenue += cat.allocated;
+    else businessRevenue += cat.allocated;
   });
+  var draw = by.owner_pay || { allocated: 0, paid: 0, outstanding: 0 };
+  var personalRevenue = draw.allocated + soleTraderRevenue;
+
+  var bizOwed = sum(keysOf(BIZ_OBLIGATIONS));
+  var perOwed = sum(keysOf(PERSONAL_OBLIGATIONS));
+
+  var html = '<article><header><h3 style="margin:0;">Budget</h3></header>';
+
+  html += dashBudgetGroup('Total revenue', 'two views of the same money — not added together', [
+    { label: 'Business', amount: businessRevenue, detail: 'invoiced by the company' },
+    { label: 'Personal', amount: personalRevenue,
+      detail: 'owner pay ' + formatCurrency(draw.allocated) +
+        ' · sole trader ' + formatCurrency(soleTraderRevenue) }
+  ]);
+
+  html += dashBudgetGroup('Total obligations',
+    formatCurrency(bizOwed.outstanding + perOwed.outstanding) + ' still to pay', [
+      { label: 'Business', amount: bizOwed.outstanding,
+        detail: 'tax, GST, ACC · paid ' + formatCurrency(bizOwed.paid) },
+      { label: 'Personal', amount: perOwed.outstanding,
+        detail: 'tax, ACC · paid ' + formatCurrency(perOwed.paid) }
+    ]);
+
+  // Spend, save, invest, donate — in the order the user reads them.
+  var DASH_ALLOCATION_ORDER = ['Spend', 'Save', 'Invest', 'Donate'];
+  var allocationBoxes = DASH_ALLOCATION_ORDER.map(function(label) {
+    var row = PERSONAL_ALLOCATIONS.find(function(r) { return r.label === label; });
+    var figures = row ? sum(row.keys) : { allocated: 0, outstanding: 0, paid: 0 };
+    return {
+      label: label,
+      amount: figures.allocated,
+      detail: figures.outstanding > 0
+        ? formatCurrency(figures.outstanding) + ' still to action'
+        : 'all actioned'
+    };
+  });
+  html += dashBudgetGroup('Personal allocations', '', allocationBoxes);
 
   html += '</article>';
   return html;
+}
+
+function dashBudgetGroup(title, note, boxes) {
+  return '<h4 class="dash-budget-group">' + escapeHtml(title) +
+      (note ? ' <span class="muted small">' + escapeHtml(note) + '</span>' : '') +
+    '</h4>' +
+    '<div class="dash-budget-grid">' +
+      boxes.map(function(box) {
+        return '<div class="dash-budget-item">' +
+          '<div class="dash-budget-item__header">' +
+            '<span>' + escapeHtml(box.label) + '</span>' +
+            '<span class="dash-budget-item__amount">' + formatCurrency(box.amount || 0) + '</span>' +
+          '</div>' +
+          '<div class="dash-budget-item__detail"><span>' + escapeHtml(box.detail || '') + '</span></div>' +
+        '</div>';
+      }).join('') +
+    '</div>';
 }
 </script>

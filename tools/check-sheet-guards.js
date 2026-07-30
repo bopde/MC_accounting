@@ -22,7 +22,8 @@ const path = require('path');
 const vm = require('vm');
 
 const ROOT = path.resolve(__dirname, '..');
-const FILES = ['BudgetCategories.gs', 'BudgetService.gs', 'SheetService.gs', 'Setup.gs', 'IdService.gs'];
+const FILES = ['BudgetCategories.gs', 'BudgetService.gs', 'SheetService.gs', 'Setup.gs',
+  'IdService.gs', 'InvoiceService.gs', 'SettingsService.gs'];
 
 const source = FILES
   .map(function(f) { return fs.readFileSync(path.join(ROOT, 'src', 'server', f), 'utf8'); })
@@ -339,6 +340,72 @@ check('missing columns are reported, not written to', function() {
       ['allocation_id', 'invoice_id', 'category', 'amount'], [['BA-001', '0526', 'Spend', 10]])
   });
   eq(app.migrateBudgetAllocations(), 0, 'no-op without the columns');
+});
+
+// --- invoice_code on an unmigrated Businesses sheet ---
+
+section('Adding a business before the invoice_code column exists');
+
+const OLD_BIZ_HEADERS = ['business_id', 'name', 'contact_name', 'email', 'address',
+  'default_rate', 'currency', 'active'];
+const NEW_BIZ_HEADERS = ['business_id', 'name', 'contact_name', 'email', 'address',
+  'default_rate', 'currency', 'invoice_code', 'active'];
+
+function withBusinesses(headers, rows) {
+  app.__ss = makeSpreadsheet({ Businesses: makeSheet('Businesses', headers, rows || []) });
+  return app.__ss.getSheetByName('Businesses');
+}
+
+check('a business with no code still saves on the old sheet', function() {
+  const sheet = withBusinesses(OLD_BIZ_HEADERS);
+  app.addBusiness({ name: 'Auckland Transport', currency: 'NZD', invoice_code: '' });
+  eq(sheet._grid[1][1], 'Auckland Transport', 'name written');
+  // The prefix is derived from the name, so nothing is lost by omitting it.
+  eq(app.businessInvoicePrefix({ name: 'Auckland Transport' }), 'AT', 'prefix still derivable');
+});
+
+check('a code the user typed fails loudly rather than vanishing', function() {
+  withBusinesses(OLD_BIZ_HEADERS);
+  throws(function() {
+    app.addBusiness({ name: 'Air Traffic', currency: 'NZD', invoice_code: 'ATC' });
+  }, 'invoice_code');
+  let msg = '';
+  try {
+    app.addBusiness({ name: 'Air Traffic 2', currency: 'NZD', invoice_code: 'ATC' });
+  } catch (e) { msg = e.message; }
+  eq(msg.indexOf('setupSheets') !== -1, true, 'message says how to fix it');
+});
+
+check('a code saves once the column exists', function() {
+  const sheet = withBusinesses(NEW_BIZ_HEADERS);
+  app.addBusiness({ name: 'Air Traffic', currency: 'NZD', invoice_code: 'atc' });
+  eq(sheet._grid[1][7], 'ATC', 'stored upper-cased');
+});
+
+check('clearing a code on the old sheet does not trip the guard', function() {
+  withBusinesses(OLD_BIZ_HEADERS, [['BIZ-001', 'Acme', '', '', '', 0, 'NZD', true]]);
+  app.updateBusiness({ business_id: 'BIZ-001', name: 'Acme', invoice_code: '' });
+  eq(app.getAll('Businesses')[0].name, 'Acme', 'update went through');
+});
+
+check('clearing a code on the new sheet actually clears it', function() {
+  const sheet = withBusinesses(NEW_BIZ_HEADERS,
+    [['BIZ-001', 'Acme', '', '', '', 0, 'NZD', 'XYZ', true]]);
+  app.updateBusiness({ business_id: 'BIZ-001', name: 'Acme', invoice_code: '' });
+  eq(sheet._grid[1][7], '', 'code cleared');
+  eq(app.businessInvoicePrefix(app.getAll('Businesses')[0]), 'AC', 'falls back to the name');
+});
+
+check('getAllBusinesses annotates the resolved prefix', function() {
+  withBusinesses(NEW_BIZ_HEADERS, [
+    ['BIZ-001', 'Auckland Transport', '', '', '', 0, 'NZD', '', true],
+    ['BIZ-002', 'Air Traffic', '', '', '', 0, 'NZD', 'ATC', true]
+  ]);
+  const rows = app.getAllBusinesses();
+  eq(rows[0].invoice_prefix, 'AT', 'derived');
+  eq(rows[0].invoice_prefix_auto, 'AT', 'auto matches when there is no override');
+  eq(rows[1].invoice_prefix, 'ATC', 'override wins');
+  eq(rows[1].invoice_prefix_auto, 'AT', 'auto shows what clearing it would give');
 });
 
 console.log('\n' + passes + ' passed, ' + failures + ' failed');
