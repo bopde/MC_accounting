@@ -351,14 +351,21 @@ For expenses: switch to the **Expenses** tab, select business and work code, ent
 
 ### Reading the Money Flow tab
 
-It answers two questions and deliberately nothing else:
+Four sections, each a row of boxes in two columns, reading top to bottom as what came in → what is owed → what is left → how it is split:
 
-1. **How much should be sitting in each pot.** The flow strip reads left to right — allocated income → business pot → Owner Pay drawn → personal pot — and each pot card breaks its buckets down by how the money leaves, with a subtotal per group:
-   1. a. **Owed out** — leaves your accounts entirely (GST, tax, ACC, donations).
-   1. b. **Held back** — stays where it is (Reserve, Save, Invest).
-   1. c. **To transfer** — moves between your own accounts (Owner Pay, Spend).
-   1. d. The business pot's total is what should still be sitting in the business bank account.
-1. **What needs doing.** One **Needs action** table lists every outstanding allocation across both pots, with the pot named on each row. Settled items and pre-company allocations are in collapsed sections underneath so they stay out of the way.
+1. **Total revenue** — Business revenue (billed hours + GST) and Sole trader revenue (pre-company).
+1. **Total obligations** — what is still owed, split into **Business** (tax, GST, ACC) and **Personal** (tax, ACC). Each box shows what is left to pay as the headline, with a progress bar and `Paid $X of $Y` underneath.
+1. **Total income** — what survives the obligations: the **Reserve pot** the business keeps, and the **Personal pot**, with the from-business and sole-trader portions named in small text.
+1. **Allocations** — the **owner pay draw** out of the company, then the personal pot split across **Save / Donate / Invest / Spend**, and finally **legacy tax withheld**. Each bucket is a box listing its allocations per invoice with a Mark Paid / Mark Set Aside / Mark Transferred button per row, and Undo to reverse one.
+
+Sole-trader money is folded into the section it belongs to rather than kept in a separate silo — legacy tax and ACC join Personal obligations, and legacy Save/Donate/Invest/Spend join their company counterparts in the same box. Only tax withheld at source stays separately labelled, because that money never arrived.
+
+The sections reconcile, which `tools/check-budget-render.js` asserts:
+
+```
+Total revenue − Total obligations = Reserve + Personal pot + withheld
+Personal pot                     = Save + Donate + Invest + Spend
+```
 
 ### Account Monitoring
 
@@ -380,7 +387,8 @@ MC/
 ├── tools/
 │   ├── check-budget-math.js        # Dependency-free node checks for the cascade
 │   ├── check-budget-integration.js # allocate -> summarise, stubbed Sheets layer
-│   └── check-sheet-guards.js       # column guards, schema check, allocation repair
+│   ├── check-sheet-guards.js       # column guards, schema check, allocation repair
+│   └── check-budget-render.js      # Budget page markup and section totals
 └── src/
     ├── appsscript.json       # Apps Script manifest (runtime config, webapp settings)
     ├── server/
@@ -563,13 +571,15 @@ The app itself only runs inside Apps Script, but the allocation cascade in `src/
 node tools/check-budget-math.js         # the cascade arithmetic
 node tools/check-budget-integration.js  # allocate -> summarise, with a stubbed Sheets layer
 node tools/check-sheet-guards.js        # column guards, schema check, allocation repair
+node tools/check-budget-render.js       # the Budget page's markup and section totals
 ```
 
 1. `check-budget-math.js` asserts the conservation invariant (every line sums to gross + GST), that Owner Pay is an exact remainder, that the distribution residual keeps the four personal buckets exact, that each rule-validation failure throws, and that the legacy sole-trader cascade produces figures identical to before the split.
 1. `check-budget-integration.js` stands in for the Sheets layer and checks that `allocateBudget` writes exactly what the preview promised, that `getBudgetSummary` returns the scoped shape the Budget page renders, that pre-company allocations resolve by label rather than colliding with the new personal buckets, and that settling and undoing move the right figures.
 1. `check-sheet-guards.js` runs `appendRow`/`updateRow`/`checkSchema`/`migrateBudgetAllocations` against an in-memory spreadsheet: a write with no matching column must throw and name it, and the allocation repair must classify per invoice — a company `Spend` becoming `legacy_spend` is the exact corruption it guards against.
+1. `check-budget-render.js` feeds a real `getBudgetSummary` result — over a fixture holding both a company allocation set and a complete pre-company one — into the actual render functions from `budget.js.html`, then asserts on the markup: every section and bucket present, buckets in order, the right settle verb per bucket, user text escaped, no `undefined`/`NaN` in the page, and the four section totals reconciling. It is the only automated check on the client rendering.
 
-Run all three before pushing any change to the budget or sheet layer. They do not replace clicking through the deployed app — the real Sheets API, client rendering and locking are only exercised there.
+Run all four before pushing any change to the budget or sheet layer. They do not replace clicking through the deployed app — the real Sheets API and locking are only exercised there.
 
 ---
 

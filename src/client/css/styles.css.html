@@ -346,31 +346,25 @@
   .app-banner code { font-size: 0.8rem; }
   .app-banner button { flex: 0 0 auto; }
 
-  /* ---- Money flow strip: income -> business -> owner pay -> personal ---- */
-  .flow-strip {
-    display: flex; align-items: stretch; gap: 0.5rem; flex-wrap: wrap;
-    padding: 0.6rem 0; border-bottom: 1px dashed var(--rule);
+  /* ---- Section and subsection totals on the Budget page ---- */
+  .section-total {
+    font-family: var(--font-display); font-weight: 300; color: var(--ocean);
+    font-size: 1.15rem; margin-left: 0.35rem;
   }
-  .flow-step { display: flex; flex-direction: column; gap: 0.1rem; flex: 1 1 9rem; min-width: 8rem; }
-  .flow-step__label {
-    font-size: 0.68rem; color: var(--muted); text-transform: uppercase;
-    letter-spacing: 0.08em; font-weight: 500;
+  .section-total--sm { font-size: 1rem; }
+  .sub-heading {
+    margin: 1rem 0 0.5rem; font-size: 0.92rem; font-weight: 500; color: var(--ocean);
+    display: flex; align-items: baseline; gap: 0.4rem; flex-wrap: wrap;
   }
-  .flow-step__value {
-    font-family: var(--font-display); font-size: 1.35rem; font-weight: 300;
-    color: var(--ocean); line-height: 1.15;
-  }
-  .flow-step__detail { font-size: 0.72rem; color: var(--muted); }
-  .flow-strip__arrow { align-self: center; color: var(--rule); font-size: 1.1rem; }
 
-  /* ---- Pot cards: business vs personal ---- */
-  .pot-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin: 1rem 0 1.5rem; }
+  /* ---- Two-column box rows: business | personal ---- */
+  .pot-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin: 0.75rem 0 1.5rem; }
   .pot-card { border: 1px solid var(--rule); border-radius: 4px; padding: 0.8rem 0.9rem; margin: 0; }
   .pot-card__header {
     display: flex; align-items: baseline; justify-content: space-between; gap: 0.75rem;
-    padding-bottom: 0.5rem; margin-bottom: 0.4rem; border-bottom: 1px solid var(--rule-2);
+    padding-bottom: 0.5rem; margin-bottom: 0.6rem; border-bottom: 1px solid var(--rule-2);
   }
-  .pot-card__header h3 { margin: 0; font-size: 1.05rem; }
+  .pot-card__header h3, .pot-card__header h4 { margin: 0; font-size: 1.05rem; }
   .pot-card__headline { display: flex; flex-direction: column; align-items: flex-end; }
   .pot-card__amount {
     font-family: var(--font-display); font-size: 1.3rem; font-weight: 300;
@@ -447,6 +441,8 @@
     grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr));
     gap: 0.75rem;
   }
+  /* Inside a half-width column the boxes stack rather than competing for width */
+  .flow-grid--stack { grid-template-columns: 1fr; }
 
   .mini-tile {
     background: var(--white);
@@ -747,8 +743,6 @@
     .flow-overview { grid-template-columns: 1fr; }
     .flow-grid { grid-template-columns: 1fr; }
     .pot-grid { grid-template-columns: 1fr; }
-    .flow-strip { flex-direction: column; }
-    .flow-strip__arrow { display: none; }
     .dash-columns { grid-template-columns: 1fr; }
     .dash-budget-grid { grid-template-columns: 1fr; }
     table { font-size: 0.8rem; }
