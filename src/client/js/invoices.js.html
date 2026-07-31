@@ -382,7 +382,11 @@ function submitInvoiceEdit(event, invoiceId) {
 
 // --- Create Invoice ---
 
+// What the on-screen preview was built from. Cleared when the form is rebuilt.
+var _previewedSelection = null;
+
 function renderCreateInvoice() {
+  _previewedSelection = null;
   var businesses = AppCache.businesses || [];
   var content = document.getElementById('invoice-tab-content');
 
@@ -465,6 +469,11 @@ function previewInvoice() {
   var currency = getCurrencyForBusiness(bizId);
 
   serverCall('getUninvoicedItems', { businessId: bizId, dateFrom: from, dateTo: to, contractId: contractId }).then(function(items) {
+    // Remember exactly what was previewed. The date and business inputs stay
+    // editable while the preview is on screen, so reading them again at confirm
+    // time could bill a different period than the one shown.
+    _previewedSelection = { businessId: bizId, dateFrom: from, dateTo: to, contractId: contractId };
+
     if (items.timeEntries.length === 0 && items.expenses.length === 0) {
       // Name what was searched — "no items for this period" reads as a data
       // failure when the real answer is usually that the range is wrong.
@@ -579,14 +588,28 @@ function confirmCreateInvoice() {
     }
   });
 
-  var contractEl = document.getElementById('inv-contract');
-  var contractId = contractEl ? contractEl.value : '';
+  // Bill what was previewed, not what the form says now.
+  var snap = _previewedSelection;
+  if (!snap) {
+    showToast('Preview the items again before creating the invoice.', 'error');
+    return;
+  }
+
+  var currentFrom = document.getElementById('inv-from').value;
+  var currentTo = document.getElementById('inv-to').value;
+  var currentBiz = document.getElementById('inv-business').value;
+  if (currentFrom !== snap.dateFrom || currentTo !== snap.dateTo || currentBiz !== snap.businessId) {
+    showToast('The business or dates changed since you previewed. Preview again to confirm what will be billed.', 'error');
+    return;
+  }
+
+  var contractId = snap.contractId || '';
   var contract = contractId ? (AppCache.contracts || []).find(function(c) { return idsMatch(c.contract_id, contractId); }) : null;
 
   var params = {
-    businessId: document.getElementById('inv-business').value,
-    dateFrom: document.getElementById('inv-from').value,
-    dateTo: document.getElementById('inv-to').value,
+    businessId: snap.businessId,
+    dateFrom: snap.dateFrom,
+    dateTo: snap.dateTo,
     includeGst: document.getElementById('inv-gst').checked,
     gstRate: Number(document.getElementById('inv-gst-rate').value) / 100,
     description: document.getElementById('inv-desc').value,

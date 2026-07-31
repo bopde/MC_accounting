@@ -61,10 +61,23 @@ function computeAllocationAmounts(rule, gross) {
  * Expenses are pass-throughs and are deliberately excluded.
  */
 function invoiceAllocationBasis(invoice) {
-  var gross = (invoice.time_subtotal != null && invoice.time_subtotal !== '')
-    ? Number(invoice.time_subtotal) : (Number(invoice.subtotal) || 0);
   var gstAmount = isTruthy(invoice.include_gst) ? (Number(invoice.gst_amount) || 0) : 0;
-  return { gross: gross, gstAmount: gstAmount };
+  return { gross: invoiceBilledSubtotal(invoice), gstAmount: gstAmount };
+}
+
+/**
+ * What an invoice billed for time: ex-GST, excluding expenses.
+ *
+ * `time_subtotal` arrived with GST support. Invoices raised before that stored
+ * only `subtotal`, which bundles expenses in, so for those rows this is the
+ * closest figure available rather than an exact one. Defined once because both
+ * the budget cascade and the dashboard's Invoiced column depend on it agreeing.
+ */
+function invoiceBilledSubtotal(invoice) {
+  if (!invoice) return 0;
+  return (invoice.time_subtotal != null && invoice.time_subtotal !== '')
+    ? (Number(invoice.time_subtotal) || 0)
+    : (Number(invoice.subtotal) || 0);
 }
 
 /**

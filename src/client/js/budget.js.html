@@ -3,14 +3,16 @@
  * Budget Allocations module.
  *
  * The Money Flow tab reads top to bottom as four sections:
- *   1. Total revenue     — what came in, split business vs sole trader
+ *   1. Revenue           — two overlapping views: what the company invoiced,
+ *                          and what reached you (owner pay + sole trader)
  *   2. Total obligations — tax, GST and ACC owed, split business vs personal
  *   3. Total income      — what is left: the business Reserve and personal pots
  *   4. Allocations       — the owner pay draw, and how the personal pot splits,
  *                          each bucket a box listing its allocations per invoice
  *
- * The sections reconcile:
- *   Total revenue - Total obligations = Reserve + Personal pot + withheld
+ * The sections reconcile on invoiced revenue (business + sole trader; the
+ * personal view overlaps it and plays no part in the identity):
+ *   invoiced revenue - Total obligations = Reserve + Personal pot + withheld
  *   Personal pot = Save + Donate + Invest + Spend
  *
  * Sole-trader (legacy) money is folded into the section it belongs to rather
@@ -26,29 +28,8 @@
  * Stored status model: allocated -> paid.
  */
 
-// Bucket groupings this page presents. Keys are registry category keys.
-var BIZ_OBLIGATIONS = [
-  { label: 'Tax to pay', keys: ['biz_tax'] },
-  // GST registration began with the company, so there is no sole-trader GST —
-  // but fold legacy_gst in rather than silently dropping a row that does exist.
-  { label: 'GST to pay', keys: ['biz_gst', 'legacy_gst'], legacyKeys: ['legacy_gst'] },
-  { label: 'ACC to pay', keys: ['biz_acc'] }
-];
-
-var PERSONAL_OBLIGATIONS = [
-  { label: 'Tax to pay', keys: ['per_tax', 'legacy_tax'], legacyKeys: ['legacy_tax'] },
-  { label: 'ACC to pay', keys: ['per_acc', 'legacy_acc'], legacyKeys: ['legacy_acc'] }
-];
-
-// Displayed in this order, each merging its company and sole-trader bucket.
-var PERSONAL_ALLOCATIONS = [
-  { label: 'Save', settle: 'hold', keys: ['per_save', 'legacy_save'] },
-  { label: 'Donate', settle: 'pay', keys: ['per_donate', 'legacy_donate'] },
-  { label: 'Invest', settle: 'hold', keys: ['per_invest', 'legacy_invest'] },
-  { label: 'Spend', settle: 'transfer', keys: ['per_spend', 'legacy_spend'] }
-];
-
-var WITHHELD_KEYS = ['legacy_tax_withheld', 'legacy_acc_withheld', 'biz_tax_withheld', 'biz_acc_withheld'];
+// The bucket groupings both the Budget page and the Dashboard render from live
+// in utils.js.html, which is included first — see BIZ_OBLIGATIONS there.
 
 function renderBudgetPage(container) {
   container.innerHTML =
@@ -182,20 +163,41 @@ function mergeCats(cats, label, settle, keys) {
   return merged;
 }
 
-/** Revenue is everything allocated that is not the Owner Pay transfer. */
-function revenueByScope(summary, wantLegacy) {
-  var total = 0;
-  var count = 0;
+/**
+ * Revenue, from each side's point of view. These two OVERLAP by the owner pay
+ * draw — the company invoiced it and then paid it to you — so they are shown as
+ * two views and never summed into a combined total.
+ *
+ *   business — everything the company invoiced (billed hours + GST)
+ *   personal — what reached you: the owner pay draw plus sole-trader income,
+ *              before any personal allocations come off it
+ */
+function revenueViews(summary, cats) {
+  var business = { total: 0, count: 0 };
+  var soleTrader = { total: 0, count: 0 };
+
   ((summary && summary.scopes) || []).forEach(function(group) {
-    var isLegacy = group.scope === 'legacy';
-    if (isLegacy !== wantLegacy) return;
+    var bucket = group.scope === 'legacy' ? soleTrader : business;
     (group.categories || []).forEach(function(cat) {
+      // The owner pay transfer is not revenue on the business side; it is the
+      // same money moving out, and it is counted on the personal side below.
       if (cat.isTransfer) return;
-      total += cat.allocated;
-      count += (cat.items || []).length;
+      bucket.total += cat.allocated;
+      bucket.count += (cat.items || []).length;
     });
   });
-  return { total: total, count: count };
+
+  var draw = catOf(cats, 'owner_pay');
+
+  return {
+    business: business,
+    soleTrader: soleTrader,
+    draw: draw,
+    personal: {
+      total: draw.allocated + soleTrader.total,
+      count: (draw.items || []).length + soleTrader.count
+    }
+  };
 }
 
 // --- Box markup (the pre-existing tile styles) ---
@@ -257,21 +259,31 @@ function subHeading(label, amount, note) {
     '</h4>';
 }
 
-// --- Header 1: Total revenue ---
+// --- Header 1: Revenue ---
 
 function renderRevenueSection(summary, cats) {
-  var business = revenueByScope(summary, false);
-  var soleTrader = revenueByScope(summary, true);
-  var total = business.total + soleTrader.total;
+  var view = revenueViews(summary, cats);
 
+  // No combined total: the two boxes overlap by the owner pay draw, so adding
+  // them would count that money twice. The note says so rather than leaving the
+  // reader to work out why the figures do not sum to anything.
   return '<section class="flow-group">' +
-    sectionTitle('Total revenue', total) +
+    '<h3 class="flow-group__title">Revenue' +
+      ' <span class="muted small">two views of the same money</span></h3>' +
     '<div class="pot-grid">' +
-      bigTile('Business revenue', business.total,
-        business.count + ' allocation' + (business.count === 1 ? '' : 's') + ' · incl. GST') +
-      bigTile('Sole trader revenue', soleTrader.total,
-        soleTrader.count + ' allocation' + (soleTrader.count === 1 ? '' : 's') + ' · pre-company') +
+      bigTile('Business revenue', view.business.total,
+        view.business.count + ' allocation' + (view.business.count === 1 ? '' : 's') + ' · incl. GST') +
+      bigTile('Personal revenue', view.personal.total,
+        'owner pay ' + formatCurrency(view.draw.allocated) +
+        ' · sole trader ' + formatCurrency(view.soleTrader.total)) +
     '</div>' +
+    '<p class="muted small" style="margin:-0.75rem 0 0;">' +
+      'Counts <strong>allocated</strong> invoices only — a paid invoice you have not ' +
+      'allocated yet is not in these figures. ' +
+      'The two overlap and are not added together: the ' + formatCurrency(view.draw.allocated) +
+      ' owner pay draw is business revenue the company then paid to you. ' +
+      'Personal revenue is before personal tax, ACC and allocations.' +
+    '</p>' +
   '</section>';
 }
 
@@ -444,15 +456,50 @@ function renderCategoryBlock(cat) {
   return html;
 }
 
+/**
+ * Sort invoice ids chronologically: <prefix?><MMYY><suffix?>, e.g. AT0526b.
+ *
+ * MMYY cannot be compared as a number — 0526 (May 2026) is numerically less
+ * than 0625 (June 2025) but chronologically later — so year comes first, then
+ * month, then the business prefix, then the suffix. Ids that do not match the
+ * shape fall back to a plain string compare.
+ */
+function parseInvoiceId(value) {
+  // Suffix matched case-insensitively: generateInvoiceId scans with /i, so the
+  // server happily continues a sequence from 'AT0526A' and the client must not
+  // then treat that same id as unparsable.
+  var m = /^([A-Za-z0-9]*?)(\d{3,4})([a-zA-Z]*)$/.exec(String(value == null ? '' : value).trim());
+  if (!m) return null;
+  // Three digits means Sheets coerced a bare '0526' to the number 526.
+  var digits = m[2].length === 3 ? '0' + m[2] : m[2];
+  return {
+    prefix: m[1].toUpperCase(),
+    month: digits.slice(0, 2),
+    year: digits.slice(2),
+    suffix: m[3].toLowerCase()
+  };
+}
+
 function sortInvoiceIds(a, b) {
   var sa = String(a), sb = String(b);
-  var ma = sa.match(/^(\d+)(.*)$/), mb = sb.match(/^(\d+)(.*)$/);
-  if (ma && mb) {
-    var na = parseInt(ma[1], 10), nb = parseInt(mb[1], 10);
-    if (na !== nb) return na - nb;
-    return ma[2].localeCompare(mb[2]);
+  var pa = parseInvoiceId(sa), pb = parseInvoiceId(sb);
+
+  // Anything unparsable (a hand-edited id) sorts last as its own block. Falling
+  // back to a string compare only when ONE side failed made the comparator
+  // intransitive — mixing a chronological order with a lexical one can produce
+  // a < b < c < a, and Array.sort then depends on input order.
+  if (!pa || !pb) {
+    if (pa) return -1;
+    if (pb) return 1;
+    return sa.localeCompare(sb);
   }
-  return sa.localeCompare(sb);
+
+  if (pa.year !== pb.year) return pa.year < pb.year ? -1 : 1;
+  if (pa.month !== pb.month) return pa.month < pb.month ? -1 : 1;
+  if (pa.prefix !== pb.prefix) return pa.prefix < pb.prefix ? -1 : 1;
+  // Shorter suffix first: '' < 'a' < 'z' < 'aa'
+  if (pa.suffix.length !== pb.suffix.length) return pa.suffix.length - pb.suffix.length;
+  return pa.suffix.localeCompare(pb.suffix);
 }
 
 function markAllocationPaid(allocationId) {

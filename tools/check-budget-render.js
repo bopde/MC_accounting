@@ -136,8 +136,11 @@ const cli = { console: console, document: { getElementById: function() { return 
 cli.serverCall = function() { return Promise.resolve(null); };
 vm.createContext(cli);
 // utils.js.html declares `var AppCache`, so populate it AFTER loading.
-vm.runInContext(inlineScript('utils.js.html') + '\n' + inlineScript('budget.js.html'),
-  cli, { filename: 'budget-client.js' });
+vm.runInContext([
+  inlineScript('utils.js.html'),
+  inlineScript('budget.js.html'),
+  inlineScript('dashboard.js.html')
+].join('\n'), cli, { filename: 'budget-client.js' });
 cli.AppCache.budgetCategories = srv.getBudgetCategories();
 cli.AppCache.businesses = db.Businesses;
 
@@ -169,15 +172,21 @@ function sectionTotal(label) {
   return m ? money(m[1]) : NaN;
 }
 
-console.log('\nHeader 1 — Total revenue');
-check('header present', html.indexOf('>Total revenue ') !== -1);
+console.log('\nHeader 1 — Revenue');
+check('header present', html.indexOf('>Revenue') !== -1);
 check('Business revenue box', html.indexOf('Business revenue') !== -1);
-check('Sole trader revenue box', html.indexOf('Sole trader revenue') !== -1);
+check('Personal revenue box', html.indexOf('Personal revenue') !== -1);
 const tiles = Array.from(html.matchAll(/flow-tile__value">([^<]+)/g)).map(function(m) { return money(m[1]); });
-check('boxes sum to the header total',
-  Math.abs((tiles[0] + tiles[1]) - sectionTotal('Total revenue')) < 0.02);
-check('business revenue is billed hours + GST (5750), got ' + tiles[0], tiles[0] === 5750);
-check('sole trader revenue is 1000, got ' + tiles[1], tiles[1] === 1000);
+check('business revenue is everything invoiced (5750), got ' + tiles[0], tiles[0] === 5750);
+// Personal revenue = owner pay draw 3050 + sole trader 1000, pre-allocations.
+check('personal revenue is draw + sole trader (4050), got ' + tiles[1], tiles[1] === 4050);
+check('the two views are not summed into a header total',
+  !/Revenue <span class="section-total">/.test(html));
+check('the overlap is spelled out', /overlap and are not added together/.test(html));
+check('the allocated-only caveat is stated', /allocated<\/strong> invoices only/.test(html));
+check('the overlap note names the draw amount', html.indexOf('$3,050.00 owner pay draw') !== -1);
+check('sub-figures name owner pay and sole trader separately',
+  html.indexOf('owner pay $3,050.00') !== -1 && html.indexOf('sole trader $1,000.00') !== -1);
 
 console.log('\nHeader 2 — Total obligations');
 check('header present', html.indexOf('>Total obligations ') !== -1);
@@ -223,11 +232,84 @@ console.log('\nWhole page');
 check('three two-column rows', (html.match(/class="pot-grid"/g) || []).length === 3);
 check('user text is HTML-escaped', html.indexOf('Bob&#39;s Consulting') !== -1);
 check('no undefined or NaN leaked into the markup', !/undefined|NaN/.test(html));
-// Header 1 - Header 2 = Header 3 + withheld, as displayed.
+// Invoiced revenue - obligations = income + withheld, as displayed. Invoiced
+// revenue is the business box plus sole trader; the personal box is the
+// overlapping view and deliberately plays no part in this identity.
+const invoicedRevenue = tiles[0] + 1000;
 const withheldShown = 100;
 check('the displayed sections reconcile',
-  Math.abs((sectionTotal('Total revenue') - sectionTotal('Total obligations')) -
+  Math.abs((invoicedRevenue - sectionTotal('Total obligations')) -
     (sectionTotal('Total income') + withheldShown)) < 0.02);
+
+// --- Dashboard budget tile, over the same allocations ---
+
+console.log('\nDashboard budget tile');
+
+// Mirrors the shape DashboardService.getDashboardData returns for `budget`.
+const dashData = srv.allCategoryDefs().map(function(def) {
+  const cat = cats[def.key];
+  return {
+    category: def.label, key: def.key, scope: def.scope, group: def.group,
+    settle: def.settle, isTransfer: !!def.isTransfer,
+    allocated: cat ? cat.allocated : 0,
+    paid: cat ? cat.paid : 0,
+    outstanding: cat ? cat.outstanding : 0
+  };
+}).filter(function(c) { return c.allocated > 0; });
+
+const dash = cli.dashBudget(dashData);
+
+check('three groups render', ['Total revenue', 'Total obligations', 'Personal allocations']
+  .every(function(t) { return dash.indexOf(t) !== -1; }));
+check('revenue shows business and personal', /Total revenue[\s\S]*?Business[\s\S]*?Personal/.test(dash));
+check('revenue says the views are not added together',
+  dash.indexOf('not added together') !== -1);
+const dashAmounts = Array.from(dash.matchAll(/dash-budget-item__amount">([^<]+)/g))
+  .map(function(m) { return money(m[1]); });
+check('business revenue matches the Budget page (5750), got ' + dashAmounts[0], dashAmounts[0] === 5750);
+check('personal revenue matches the Budget page (4050), got ' + dashAmounts[1], dashAmounts[1] === 4050);
+check('obligations split business/personal, outstanding only',
+  dashAmounts[2] === 2200 && dashAmounts[3] === 1235.93);
+check('four personal allocation boxes in spend/save/invest/donate order',
+  /Spend[\s\S]*?Save[\s\S]*?Invest[\s\S]*?Donate/.test(dash.split('Personal allocations')[1]));
+check('allocation amounts match the Budget page buckets',
+  dashAmounts.slice(4).join(',') === '1899.85,271.41,407.11,135.7');
+check('no undefined or NaN in the dashboard tile', !/undefined|NaN/.test(dash));
+check('dashboard reuses the Budget page groupings, not its own copies',
+  typeof cli.BIZ_OBLIGATIONS !== 'undefined' && typeof cli.PERSONAL_ALLOCATIONS !== 'undefined');
+
+// --- Dashboard Hours & Earnings table ---
+
+console.log('\nDashboard hours table');
+
+const bizMap = { 'BIZ-001': { name: "Bob's Consulting", currency: 'NZD' },
+  'BIZ-002': { name: 'Beta Corp', currency: 'NZD' } };
+const dashTimeEntries = [
+  { business_id: 'BIZ-001', hours: 8, line_total: 1200 },
+  { business_id: 'BIZ-001', hours: 2, line_total: 300 }
+];
+const dashInvoices = [
+  // time_subtotal is billed time only; total and subtotal carry GST/expenses.
+  { business_id: 'BIZ-001', status: 'paid', time_subtotal: 5000, subtotal: 5200, total: 5950 },
+  { business_id: 'BIZ-001', status: 'void', time_subtotal: 9999, subtotal: 9999, total: 9999 },
+  // Invoiced this period, no hours logged in it — May's work billed in June.
+  { business_id: 'BIZ-002', status: 'sent', time_subtotal: 800, subtotal: 800, total: 920 }
+];
+const hoursHtml = cli.dashHours(dashTimeEntries, dashInvoices, bizMap);
+
+check('an Invoiced column is present', hoursHtml.indexOf('>Invoiced<') !== -1);
+check('invoiced uses billed time, not the GST-inclusive total',
+  hoursHtml.indexOf('$5,000.00') !== -1 && hoursHtml.indexOf('$5,950.00') === -1);
+check('voided invoices are excluded', hoursHtml.indexOf('9,999') === -1);
+check('a business invoiced but with no hours still gets a row',
+  hoursHtml.indexOf('Beta Corp') !== -1 && hoursHtml.indexOf('$800.00') !== -1);
+check('that row shows zero hours rather than blank', /Beta Corp<\/td>[\s\S]*?>0\.0</.test(hoursHtml));
+check('hours and earned are unchanged',
+  hoursHtml.indexOf('10.0') !== -1 && hoursHtml.indexOf('$1,500.00') !== -1);
+check('the total row totals invoiced too', /total-row[\s\S]*?\$5,800\.00/.test(hoursHtml));
+check('the caveat about expenses and GST is stated',
+  hoursHtml.indexOf('excludes expenses and GST') !== -1);
+check('no undefined or NaN in the hours table', !/undefined|NaN/.test(hoursHtml));
 
 console.log('\n' + passes + ' passed, ' + failures + ' failed');
 process.exit(failures > 0 ? 1 : 0);

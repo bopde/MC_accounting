@@ -36,6 +36,14 @@ A finance management web app built entirely on Google Apps Script with Google Sh
 - Status flow: draft -> sent -> paid -> void.
 - Entries are marked with the invoice ID once invoiced, preventing double-billing.
 
+**Invoice numbers** are `<business code><MMYY>` — Auckland Transport for May 2026 is `AT0526`. Further invoices for the same client in the same month get a letter suffix: `AT0526a`, `AT0526b`. Numbering is per client per month, so two clients invoiced in May both start unsuffixed.
+
+1. The code defaults to the initials of the business name, skipping connectives and legal suffixes: `Auckland Transport` -> `AT`, `Ministry of Business and Employment` -> `MBE`, `Beta Corp Limited` -> `BC`. A single-word name takes its first two letters: `Acme` -> `AC`.
+1. Set an explicit **invoice code** on the business in Settings to override it — needed when the initials read badly. Saving a business whose code would clash with another one is **refused**, naming the client it clashes with: two clients sharing a prefix share one sequence, so each ends up with a run full of holes.
+1. A code never starts with a digit. `normalizeId` strips leading zeros from every id it compares, so a prefix beginning `0` would make `0S0526` and `S0526` alias each other and `findById` could return the wrong invoice.
+1. Numbering counts a client's invoices **for that month**, not matching id text, so renaming a business cannot restart its sequence and produce a second unsuffixed invoice. A number that has been used is never reissued, even if the invoice was deleted — a client's records may still refer to it.
+1. Invoices raised before this format existed keep their bare `MMYY` ids, and their sequence continues independently.
+
 ### 3. Budget Allocations
 
 Budgeting is split into two scopes — **business** (company money that stays in the business account) and **personal** (money drawn out) — joined by a derived **Owner Pay** bridge. Allocations are calculated from billed hours only, ex-GST; expenses are treated as pass-throughs.
@@ -67,7 +75,7 @@ The percentages are yours to set — the seeded defaults reflect current NZ rate
 
 ### 5. Settings
 - **My Details**: Name, address, email, phone, tax number, GST number, bank account, payment terms. Appears on invoices.
-- **Businesses**: Client name, contact, email, address, default rate, currency. Soft-delete to preserve history.
+- **Businesses**: Client name, contact, email, address, default rate, currency, and an optional **invoice code** that prefixes their invoice numbers. Soft-delete to preserve history.
 - **Work Codes**: Short codes (DEV, DESIGN, etc.) with descriptions and categories.
 - **Accounts**: Bank, investment, hold, crypto, or other accounts with currency, scope (business or personal), and purpose.
 - **Budget Rules**: Named percentage-split templates. One can be marked as default. The form is generated from the category registry and shows the implied Owner Pay percentage as you type.
@@ -100,7 +108,7 @@ Google Spreadsheet (your private Sheet)
 2. **Client SPA**: A hash-based router (`#hours`, `#invoices`, etc.) in `app.js.html` handles page navigation. On each route change, reference data is loaded from cache (or fetched from the server), then the page render function is called.
 3. **Client-server RPC**: Client code calls server functions via `google.script.run`, wrapped in a Promise-based `serverCall()` utility with a 15-second timeout. Functions that need multiple arguments use pipe-delimited strings through `ClientWrappers.gs`.
 4. **Data layer**: `SheetService.gs` provides generic CRUD (getAll, appendRow, updateRow, findById). Each service module (Hours, Invoice, Budget, Account, Settings) builds on these primitives. `getSpreadsheet()` calls `SpreadsheetApp.getActiveSpreadsheet()` -- no ID configuration needed because the script is bound to its spreadsheet.
-5. **ID generation**: `IdService.gs` generates sequential IDs (TE-001, EXP-001, INV-2026-001, etc.) using `LockService` to prevent race conditions across concurrent tabs.
+5. **ID generation**: `nextId()` in `IdService.gs` generates sequential reference ids (TE-001, EXP-001, BA-042). Invoices instead use `generateInvoiceId()` in `InvoiceService.gs` for the `AT0526` format. Both run inside `withScriptLock` so the read-then-write is atomic — see [Data Integrity](#data-integrity).
 6. **Caching**: `AppCache` on the client stores reference data (businesses, work codes, accounts, budget rules, my details) to reduce server round-trips. The cache is cleared on settings changes.
 
 ### Security Model
@@ -171,7 +179,7 @@ The spreadsheet has **11 tabs**, created automatically by `setupSheets()`:
 | Tab | Purpose | Key Fields |
 |-----|---------|-----------|
 | **MyDetails** | Invoice "From" details (key/value pairs) | key, value |
-| **Businesses** | Client/employer reference data | business_id, name, contact_name, email, address, default_rate, currency, active |
+| **Businesses** | Client/employer reference data | business_id, name, contact_name, email, address, default_rate, currency, invoice_code, active |
 | **WorkCodes** | Job classification codes | code_id, description, category, contract_id, active |
 | **Accounts** | Bank/investment accounts | account_id, name, type, currency, scope, purpose, active |
 | **BudgetRules** | Budget percentage templates | rule_id, name, model, legacy `tax_withheld_pct`…`spend_pct`, company `biz_*_pct` / `per_*_pct`, is_default, notes, active |
@@ -314,7 +322,7 @@ Simply saving the code in the editor is not enough -- the deployed web app serve
 ### First-Time Setup (After Deployment)
 
 1. **Settings > My Details**: Fill in your name, address, email, phone, tax/GST numbers, bank account, and payment terms. These appear on invoices.
-2. **Settings > Businesses**: Add your clients/employers with their contact info, default hourly rate, and currency.
+2. **Settings > Businesses**: Add your clients/employers with their contact info, default hourly rate, and currency. The **invoice code** can be left blank — it defaults to the initials of the name.
 3. **Settings > Work Codes**: Add codes for the types of work you do (e.g., DEV - Development, DESIGN - Design Work, ADMIN - Administration).
 4. **Settings > Accounts**: Add your bank, investment, savings, and other accounts you want to track.
 5. **Settings > Budget Rules**: `setupSheets` seeds a "Company Default" rule. Edit it — set your business tax, ACC and reserve percentages (the form shows the resulting Owner Pay as you type), your personal tax and ACC, and a Donate/Save/Invest/Spend split summing to 100%.
@@ -353,19 +361,32 @@ For expenses: switch to the **Expenses** tab, select business and work code, ent
 
 Four sections, each a row of boxes in two columns, reading top to bottom as what came in → what is owed → what is left → how it is split:
 
-1. **Total revenue** — Business revenue (billed hours + GST) and Sole trader revenue (pre-company).
+1. **Revenue** — two views of the same money, deliberately **not** added together. Both count **allocated** invoices only, so a paid invoice you have not allocated yet is absent:
+   1. a. **Business revenue** — everything the company invoiced, including GST.
+   1. b. **Personal revenue** — what actually reached you: the owner pay draw plus sole-trader income, before personal tax, ACC and allocations.
+   1. c. They overlap by the owner pay draw — business revenue the company then paid to you — so there is no combined total, and the section says so rather than leaving you to work out why the boxes do not sum.
 1. **Total obligations** — what is still owed, split into **Business** (tax, GST, ACC) and **Personal** (tax, ACC). Each box shows what is left to pay as the headline, with a progress bar and `Paid $X of $Y` underneath.
 1. **Total income** — what survives the obligations: the **Reserve pot** the business keeps, and the **Personal pot**, with the from-business and sole-trader portions named in small text.
 1. **Allocations** — the **owner pay draw** out of the company, then the personal pot split across **Save / Donate / Invest / Spend**, and finally **legacy tax withheld**. Each bucket is a box listing its allocations per invoice with a Mark Paid / Mark Set Aside / Mark Transferred button per row, and Undo to reverse one.
 
 Sole-trader money is folded into the section it belongs to rather than kept in a separate silo — legacy tax and ACC join Personal obligations, and legacy Save/Donate/Invest/Spend join their company counterparts in the same box. Only tax withheld at source stays separately labelled, because that money never arrived.
 
-The sections reconcile, which `tools/check-budget-render.js` asserts:
+The sections reconcile on **invoiced** revenue — business plus sole trader. The personal view overlaps that and plays no part in the identity. `tools/check-budget-render.js` asserts both:
 
 ```
-Total revenue − Total obligations = Reserve + Personal pot + withheld
-Personal pot                     = Save + Donate + Invest + Spend
+invoiced revenue − Total obligations = Reserve + Personal pot + withheld
+Personal pot                        = Save + Donate + Invest + Spend
 ```
+
+### The Dashboard hours table
+
+**Hours & Earnings** lists, per client: hours logged, **Earned** (the value of that logged time) and **Invoiced** (billed time only — excluding expenses and GST, i.e. the invoice's `time_subtotal`). Voided invoices are excluded, and a client invoiced in the period with no hours logged in it still gets a row.
+
+Earned and Invoiced are deliberately different sets of work: Earned is time logged inside the date range, Invoiced is what was billed inside it — May's work invoiced in June appears in each of them in a different month.
+
+### The Dashboard budget tile
+
+The same figures, condensed to three groups: **Total revenue** (business and personal, with the same overlap caveat), **Total obligations** (business and personal, outstanding only), and **Personal allocations** (spend, save, invest, donate). The bucket groupings are shared globals in `utils.js.html`, so the Dashboard and the Budget page cannot drift apart.
 
 ### Account Monitoring
 
@@ -388,7 +409,9 @@ MC/
 │   ├── check-budget-math.js        # Dependency-free node checks for the cascade
 │   ├── check-budget-integration.js # allocate -> summarise, stubbed Sheets layer
 │   ├── check-sheet-guards.js       # column guards, schema check, allocation repair
-│   └── check-budget-render.js      # Budget page markup and section totals
+│   ├── check-budget-render.js      # Budget page + Dashboard markup and totals
+│   ├── check-invoice-ids.js        # invoice number format and sequencing
+│   └── check-client-smoke.js       # every client page renders without throwing
 └── src/
     ├── appsscript.json       # Apps Script manifest (runtime config, webapp settings)
     ├── server/
@@ -555,10 +578,10 @@ Server:  updateInvoiceStatusFromClient('INV-2026-001|paid')
            -> splits on '|'
            -> calls updateInvoiceStatus('INV-2026-001', 'paid')
 
-Client:  serverCall('allocateBudgetFromClient', '0526|BR-001')
-Server:  allocateBudgetFromClient('0526|BR-001')
+Client:  serverCall('allocateBudgetFromClient', 'AT0526|BR-001')
+Server:  allocateBudgetFromClient('AT0526|BR-001')
            -> splits on '|'
-           -> calls allocateBudget('0526', 'BR-001')
+           -> calls allocateBudget('AT0526', 'BR-001')
 ```
 
 ---
@@ -571,15 +594,20 @@ The app itself only runs inside Apps Script, but the allocation cascade in `src/
 node tools/check-budget-math.js         # the cascade arithmetic
 node tools/check-budget-integration.js  # allocate -> summarise, with a stubbed Sheets layer
 node tools/check-sheet-guards.js        # column guards, schema check, allocation repair
-node tools/check-budget-render.js       # the Budget page's markup and section totals
+node tools/check-budget-render.js       # Budget page + Dashboard markup and totals
+node tools/check-invoice-ids.js         # invoice number format, sequencing and ordering
+node tools/check-client-smoke.js        # every client page, tab and edit view renders
 ```
 
 1. `check-budget-math.js` asserts the conservation invariant (every line sums to gross + GST), that Owner Pay is an exact remainder, that the distribution residual keeps the four personal buckets exact, that each rule-validation failure throws, and that the legacy sole-trader cascade produces figures identical to before the split.
 1. `check-budget-integration.js` stands in for the Sheets layer and checks that `allocateBudget` writes exactly what the preview promised, that `getBudgetSummary` returns the scoped shape the Budget page renders, that pre-company allocations resolve by label rather than colliding with the new personal buckets, and that settling and undoing move the right figures.
 1. `check-sheet-guards.js` runs `appendRow`/`updateRow`/`checkSchema`/`migrateBudgetAllocations` against an in-memory spreadsheet: a write with no matching column must throw and name it, and the allocation repair must classify per invoice — a company `Spend` becoming `legacy_spend` is the exact corruption it guards against.
-1. `check-budget-render.js` feeds a real `getBudgetSummary` result — over a fixture holding both a company allocation set and a complete pre-company one — into the actual render functions from `budget.js.html`, then asserts on the markup: every section and bucket present, buckets in order, the right settle verb per bucket, user text escaped, no `undefined`/`NaN` in the page, and the four section totals reconciling. It is the only automated check on the client rendering.
+1. `check-budget-render.js` feeds a real `getBudgetSummary` result — over a fixture holding both a company allocation set and a complete pre-company one — into the actual render functions from `budget.js.html` and `dashboard.js.html`, then asserts on the markup: every section and bucket present, buckets in order, the right settle verb per bucket, user text escaped, no `undefined`/`NaN` in the page, the section totals reconciling, and the Dashboard's figures matching the Budget page's. It is the only automated check on the client rendering.
+1. `check-invoice-ids.js` covers the invoice number format end to end: prefix derivation from awkward names, per-client-per-month sequencing, the `z` -> `aa` suffix rollover, existing bare `MMYY` ids continuing independently, a leading zero stripped by Sheets still being recognised, and chronological ordering (`0625` is June 2025, which sorts *before* `0526` — May 2026 — despite being the larger number).
 
-Run all four before pushing any change to the budget or sheet layer. They do not replace clicking through the deployed app — the real Sheets API and locking are only exercised there.
+1. `check-client-smoke.js` loads every client module into one context with a minimal DOM and stubbed server responses, then drives every page, every tab, and every detail/edit view. It asserts nothing throws, no error toast is raised, no promise rejection goes unhandled, and that every `serverCall` the client makes has a fixture — so a call renamed on the server but not the client shows up here. It checks that the pages *run*, not what they look like.
+
+Run all six before pushing any change to the budget, invoice or sheet layer. They do not replace clicking through the deployed app — the real Sheets API and locking are only exercised there.
 
 ---
 

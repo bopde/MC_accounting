@@ -106,7 +106,7 @@ function generateInvoiceLocked(params) {
   var total = subtotal + gstAmount;
 
   // Generate MMYY invoice ID based on the period end date
-  var invoiceId = generateInvoiceId(params.dateTo);
+  var invoiceId = generateInvoiceId(params.dateTo, params.businessId);
 
   var invoice = appendRow('Invoices', {
     invoice_id: invoiceId,
@@ -396,44 +396,174 @@ function getInvoicesWithDetails(params) {
 }
 
 /**
- * Generate invoice ID in MMYY format based on the period end date.
- * E.g. dateTo of "2026-05-31" → "0526".
- * Subsequent invoices in the same month get a letter suffix: 0526a, 0526b, etc.
+ * Words that carry no identity, so they are skipped when deriving initials.
+ * "Ministry of Business and Employment" -> MBE, not MOBAE.
  */
-function generateInvoiceId(dateTo) {
+var INVOICE_PREFIX_STOPWORDS = ['of', 'the', 'and', 'a', 'an', 'for', 'at',
+  'ltd', 'limited', 'inc', 'incorporated', 'llc', 'llp', 'plc', 'pty', 'co', 'nz'];
+
+var INVOICE_PREFIX_MAX = 3;
+var INVOICE_CODE_MAX = 6;
+
+/**
+ * Clean a prefix to the characters an invoice id may safely carry.
+ *
+ * Leading digits are dropped, which is not cosmetic: normalizeId() strips
+ * leading zeros from every id it compares (Sheets turns a bare '0526' into the
+ * number 526), so a prefix beginning with 0 makes ids alias each other —
+ * '0S0526' and 'S0526' both normalise to 'S0526', and '00526' collides with a
+ * legacy '0526'. findById would then return the wrong invoice, and voiding or
+ * allocating would hit the wrong record. Requiring a letter first removes the
+ * whole class.
+ */
+function normaliseInvoicePrefix(value) {
+  return String(value == null ? '' : value)
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, '')
+    .replace(/^[0-9]+/, '');
+}
+
+/**
+ * The invoice-ID prefix for a business: "Auckland Transport" -> "AT".
+ *
+ * An explicit invoice_code on the business always wins — needed when the
+ * initials read badly, or when two clients would otherwise share a prefix.
+ * Otherwise: one letter per significant word, or the first two letters when the
+ * name is a single word, capped at INVOICE_PREFIX_MAX characters. An explicit
+ * code may run to INVOICE_CODE_MAX.
+ *
+ * Returns '' when there is no usable name, which falls back to the old
+ * prefix-less MMYY id rather than failing the invoice.
+ */
+function businessInvoicePrefix(business) {
+  if (!business) return '';
+
+  var explicit = normaliseInvoicePrefix(business.invoice_code);
+  if (explicit) return explicit.slice(0, INVOICE_CODE_MAX);
+
+  var words = String(business.name || '').split(/[^A-Za-z0-9]+/).filter(Boolean);
+  if (words.length === 0) return '';
+
+  var significant = words.filter(function(w) {
+    if (INVOICE_PREFIX_STOPWORDS.indexOf(w.toLowerCase()) !== -1) return false;
+    // Drop one-letter fragments: splitting on punctuation turns "Bob's Bakery"
+    // into Bob / s / Bakery, and that stray 's' would give BSB instead of BB.
+    return w.length > 1;
+  });
+  // Unless dropping them left nothing — "H & M" is genuinely single letters.
+  if (significant.length === 0) {
+    significant = words.filter(function(w) {
+      return INVOICE_PREFIX_STOPWORDS.indexOf(w.toLowerCase()) === -1;
+    });
+  }
+  if (significant.length === 0) significant = words;
+
+  var raw = significant.length === 1
+    ? significant[0].slice(0, 2)
+    : significant.map(function(w) { return w.charAt(0); }).join('');
+
+  return normaliseInvoicePrefix(raw).slice(0, INVOICE_PREFIX_MAX);
+}
+
+/**
+ * Generate an invoice ID: business prefix + MMYY of the period end date.
+ * E.g. Auckland Transport for May 2026 -> "AT0526".
+ * Further invoices for the SAME business in the SAME month get a letter
+ * suffix: AT0526a, AT0526b, ...
+ *
+ * With no business (or an unusable name) the id falls back to bare MMYY, which
+ * is the format every invoice used before prefixes existed.
+ */
+function generateInvoiceId(dateTo, businessId) {
   // Re-entrant: generateInvoice already holds the lock across the scan and the
   // write, which is what stops two submissions computing the same ID. Taking
   // and releasing a separate lock here would leave that window open.
   return withScriptLock(function() {
-    var parts = String(dateTo).split('-');
+    // Normalise first: a Date object or a malformed string used to slice into
+    // nonsense, producing ids like "ATundefined" — or, when the value contained
+    // a bracket, an unmatched-paren error from the pattern built below.
+    var iso = dateOnly(dateTo);
+    if (!iso) {
+      throw new Error('Cannot generate an invoice number: "' + dateTo +
+        '" is not a valid period end date. Expected YYYY-MM-DD.');
+    }
+
+    var parts = iso.split('-');
     var mm = parts[1];
     var yy = parts[0].slice(-2);
     var base = mm + yy;
 
+    var business = businessId ? findById('Businesses', businessId) : null;
+    var prefix = businessInvoicePrefix(business);
+    var stem = prefix + base;
+
     var invoices = getAll('Invoices');
-    var baseNum = base.replace(/^0+/, '');
-    var pattern = new RegExp('^0*' + baseNum + '([a-z]*)$');
-    var maxSuffix = '';
-    var count = 0;
+
+    // Count prior invoices by BUSINESS AND MONTH, not by matching the id text.
+    // Matching text meant a renamed business restarted its sequence — "Acme"
+    // (AC0526) becoming "Acme Digital" produced a second unsuffixed invoice for
+    // the same client and month — and two clients sharing a prefix interleaved
+    // one sequence, giving each of them a gappy run.
+    //
+    // With no business we cannot scope it, so fall back to matching the bare
+    // MMYY text, which is what every pre-prefix invoice used. Only there is the
+    // stripped-leading-zero tolerance needed: Sheets stores '0526' as 526.
+    var priorCount;
+    if (businessId) {
+      priorCount = invoices.filter(function(inv) {
+        if (!idsMatch(inv.business_id, businessId)) return false;
+        var d = dateOnly(inv.date_to || inv.created_date);
+        return d.slice(0, 4) === parts[0] && d.slice(5, 7) === mm;
+      }).length;
+    } else {
+      var baseNum = base.replace(/^0+/, '');
+      var barePattern = new RegExp('^0*' + baseNum + '([a-z]*)$', 'i');
+      priorCount = invoices.filter(function(inv) {
+        return barePattern.test(String(inv.invoice_id));
+      }).length;
+    }
+
+    var taken = {};
+    var highest = '';
     invoices.forEach(function(inv) {
-      var m = pattern.exec(String(inv.invoice_id));
-      if (m) {
-        count++;
-        // Compare by length first: plain '>' puts 'aa' below 'z', so once a
-        // month reached suffix 'z' every later invoice reused 'aa'.
-        if (m[1].length > maxSuffix.length ||
-            (m[1].length === maxSuffix.length && m[1] > maxSuffix)) {
-          maxSuffix = m[1];
-        }
-      }
+      var id = String(inv.invoice_id).trim();
+      taken[id.toUpperCase()] = true;
+
+      // Highest suffix already issued under THIS stem. A number that has been
+      // used must never be reused, even if the invoice was later deleted — a
+      // client's records may still refer to it. So the sequence only ever moves
+      // forward, never fills a hole.
+      if (id.toUpperCase().indexOf(stem.toUpperCase()) !== 0) return;
+      var tail = id.slice(stem.length).toLowerCase();
+      if (!/^[a-z]*$/.test(tail)) return;
+      if (suffixIndex(tail) > suffixIndex(highest)) highest = tail;
     });
 
-    if (count === 0) return base;
+    // Position by count so a rename or a shared prefix cannot restart the
+    // sequence, but never at or below a suffix already used under this stem.
+    var start = priorCount === 0 ? 0 : Math.max(priorCount, suffixIndex(highest) + 1);
 
-    // Next suffix after the highest existing one
-    var nextChar = maxSuffix === '' ? 'a' : nextSuffix(maxSuffix);
-    return base + nextChar;
+    var suffix = '';
+    while (suffixIndex(suffix) < start || taken[(stem + suffix).toUpperCase()]) {
+      suffix = suffix === '' ? 'a' : nextSuffix(suffix);
+    }
+
+    return stem + suffix;
   });
+}
+
+/**
+ * Position of a suffix in the sequence: '' -> 0, a -> 1, z -> 26, aa -> 27.
+ * Bijective base-26, so suffixes compare as numbers rather than as strings —
+ * plain '>' puts 'aa' below 'z'.
+ */
+function suffixIndex(suffix) {
+  var n = 0;
+  var s = String(suffix || '');
+  for (var i = 0; i < s.length; i++) {
+    n = n * 26 + (s.charCodeAt(i) - 96);
+  }
+  return n;
 }
 
 function nextSuffix(s) {

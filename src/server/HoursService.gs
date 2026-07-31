@@ -121,6 +121,15 @@ function getExpenses(filters) {
  * Update an existing time entry. Blocked if already invoiced.
  */
 function updateTimeEntry(data) {
+  // Locked: findById resolves a _rowIndex that another execution — or a row
+  // deleted in the Sheets UI — can shift before the write lands, silently
+  // overwriting or removing a different entry.
+  return withScriptLock(function() {
+    return updateTimeEntryLocked(data);
+  });
+}
+
+function updateTimeEntryLocked(data) {
   var entry = findById('TimeEntries', data.entry_id);
   if (!entry) throw new Error('Time entry not found: ' + data.entry_id);
   if (entry.invoice_id && entry.invoice_id !== '') {
@@ -160,6 +169,15 @@ function updateTimeEntry(data) {
  * Delete a time entry. Blocked if already invoiced.
  */
 function deleteTimeEntry(entryId) {
+  // Locked: findById resolves a _rowIndex that another execution — or a row
+  // deleted in the Sheets UI — can shift before the write lands, silently
+  // overwriting or removing a different entry.
+  return withScriptLock(function() {
+    return deleteTimeEntryLocked(entryId);
+  });
+}
+
+function deleteTimeEntryLocked(entryId) {
   var entry = findById('TimeEntries', entryId);
   if (!entry) throw new Error('Time entry not found: ' + entryId);
   if (entry.invoice_id && entry.invoice_id !== '') {
@@ -173,6 +191,15 @@ function deleteTimeEntry(entryId) {
  * Update an existing expense. Blocked if already invoiced.
  */
 function updateExpense(data) {
+  // Locked: findById resolves a _rowIndex that another execution — or a row
+  // deleted in the Sheets UI — can shift before the write lands, silently
+  // overwriting or removing a different entry.
+  return withScriptLock(function() {
+    return updateExpenseLocked(data);
+  });
+}
+
+function updateExpenseLocked(data) {
   var expense = findById('Expenses', data.expense_id);
   if (!expense) throw new Error('Expense not found: ' + data.expense_id);
   if (expense.invoice_id && expense.invoice_id !== '') {
@@ -200,6 +227,15 @@ function updateExpense(data) {
  * Delete an expense. Blocked if already invoiced.
  */
 function deleteExpense(expenseId) {
+  // Locked: findById resolves a _rowIndex that another execution — or a row
+  // deleted in the Sheets UI — can shift before the write lands, silently
+  // overwriting or removing a different entry.
+  return withScriptLock(function() {
+    return deleteExpenseLocked(expenseId);
+  });
+}
+
+function deleteExpenseLocked(expenseId) {
   var expense = findById('Expenses', expenseId);
   if (!expense) throw new Error('Expense not found: ' + expenseId);
   if (expense.invoice_id && expense.invoice_id !== '') {

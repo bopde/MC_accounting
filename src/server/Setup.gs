@@ -28,7 +28,7 @@ function sheetSchemas() {
   return {
     'Businesses': [
       'business_id', 'name', 'contact_name', 'email', 'address',
-      'default_rate', 'currency', 'active'
+      'default_rate', 'currency', 'invoice_code', 'active'
     ],
     'WorkCodes': [
       'code_id', 'description', 'category', 'contract_id', 'active'

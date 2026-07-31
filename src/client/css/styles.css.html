@@ -667,10 +667,24 @@
   .revenue-chart { display: block; width: 100%; min-height: 120px; }
   .flow-tile--warn { border-left-color: var(--warn); }
 
+  .dash-budget-group {
+    margin: 0.9rem 0 0.4rem;
+    font-size: 0.72rem;
+    font-weight: 500;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    display: flex; align-items: baseline; gap: 0.4rem; flex-wrap: wrap;
+  }
+  .dash-budget-group .small { text-transform: none; letter-spacing: 0; }
   .dash-budget-grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(min(250px, 100%), 1fr));
     gap: 0.75rem;
+  }
+  .dash-budget-item__amount {
+    font-family: var(--font-display); font-weight: 300; font-size: 1.05rem;
+    color: var(--ocean); white-space: nowrap;
   }
   .dash-budget-item {
     padding: 0.6rem 0.75rem;

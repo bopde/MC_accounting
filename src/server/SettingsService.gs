@@ -64,7 +64,56 @@ function addBusiness(data) {
   }
   data.active = true;
   if (!data.currency) data.currency = 'NZD';
+
+  // Only send invoice_code when there is one. Writes reject unknown columns, so
+  // including a blank would make every "Add Business" fail on a spreadsheet
+  // that has not been migrated yet — while a code the user actually typed
+  // SHOULD fail loudly rather than vanish.
+  var code = assertInvoiceCodeUsable(data.invoice_code);
+  if (code) data.invoice_code = code;
+  else delete data.invoice_code;
+
+  assertInvoicePrefixFree(data);
+
   return appendRow('Businesses', data);
+}
+
+/**
+ * Refuse a business whose invoice prefix already belongs to another one.
+ *
+ * Two clients sharing a prefix share a numbering sequence, so each of them
+ * receives a run with holes — AT0526 then AT0526b — which reads as a lost
+ * invoice to their accounts team, and the id no longer says whose invoice it is.
+ * Cheaper to catch here than to explain later.
+ */
+function assertInvoicePrefixFree(data, excludeBusinessId) {
+  var prefix = businessInvoicePrefix(data);
+  if (!prefix) return;
+
+  var clash = getAll('Businesses').filter(function(b) {
+    if (excludeBusinessId && idsMatch(b.business_id, excludeBusinessId)) return false;
+    return businessInvoicePrefix(b) === prefix;
+  })[0];
+
+  if (clash) {
+    throw new Error('Invoice code "' + prefix + '" is already used by "' + clash.name +
+      '". Set a different Invoice Code so their invoice numbers stay distinct.');
+  }
+}
+
+/**
+ * A code the user typed must survive normalisation, or they would silently get
+ * the name-derived prefix instead of what they asked for.
+ */
+function assertInvoiceCodeUsable(raw) {
+  var typed = String(raw == null ? '' : raw).trim();
+  if (!typed) return '';
+  var code = normaliseInvoicePrefix(typed);
+  if (!code) {
+    throw new Error('Invoice code "' + typed + '" is not usable — it must contain a letter, ' +
+      'and cannot start with a digit (leading zeros would make invoice numbers ambiguous).');
+  }
+  return code;
 }
 
 function updateBusiness(data) {
@@ -77,13 +126,38 @@ function updateBusiness(data) {
   if (data.default_rate !== undefined) biz.default_rate = Number(data.default_rate) || 0;
   if (data.currency !== undefined) biz.currency = data.currency;
   if (data.address !== undefined) biz.address = data.address;
+  if (data.invoice_code !== undefined) {
+    var code = assertInvoiceCodeUsable(data.invoice_code);
+    // Assign only when there is a code to store, or when the row already has
+    // the column — otherwise clearing the field on an unmigrated sheet would
+    // add an unknown key and trip the write guard for no gain.
+    if (code || Object.prototype.hasOwnProperty.call(biz, 'invoice_code')) {
+      biz.invoice_code = code;
+    }
+  }
+
+  // Checked against the merged row, since a rename alone can change the prefix.
+  assertInvoicePrefixFree(biz, biz.business_id);
 
   updateRow('Businesses', biz._rowIndex, biz);
   return biz;
 }
 
+/**
+ * All businesses, each annotated with the invoice prefix it will actually use.
+ *
+ * Resolved server-side so the UI never has to re-implement the derivation rule
+ * and drift from businessInvoicePrefix():
+ *   invoice_prefix      — what invoices will actually carry
+ *   invoice_prefix_auto — what the name alone would give, for the placeholder
+ *                         that shows what clearing the override would do
+ */
 function getAllBusinesses() {
-  return getAll('Businesses');
+  return getAll('Businesses').map(function(b) {
+    b.invoice_prefix = businessInvoicePrefix(b);
+    b.invoice_prefix_auto = businessInvoicePrefix({ name: b.name });
+    return b;
+  });
 }
 
 // --- Work Codes ---
