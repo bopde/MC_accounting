@@ -58,8 +58,12 @@ function renderMyDetailsSettings() {
       '</div>' +
       '<label>Address <textarea id="md-address" rows="2">' + escapeHtml(my.address || '') + '</textarea></label>' +
       '<div class="form-row">' +
-        '<label>Tax Number (IRD / EIN) <input type="text" id="md-tax" value="' + escapeHtml(my.tax_number || '') + '"></label>' +
-        '<label>GST Number <input type="text" id="md-gst" value="' + escapeHtml(my.gst_number || '') + '"></label>' +
+        '<label>Tax Number (IRD / EIN) <input type="text" id="md-tax" value="' + escapeHtml(my.tax_number || '') + '">' +
+          '<small class="muted">Kept for reference only &mdash; not printed on invoices.</small>' +
+        '</label>' +
+        '<label>GST Number <input type="text" id="md-gst" value="' + escapeHtml(my.gst_number || '') + '">' +
+          '<small class="muted">Shown on invoices.</small>' +
+        '</label>' +
       '</div>' +
       '<div class="form-row">' +
         '<label>Bank Account (for payment) <input type="text" id="md-bank" value="' + escapeHtml(my.bank_account || '') + '"></label>' +

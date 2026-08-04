@@ -139,7 +139,8 @@ vm.createContext(cli);
 vm.runInContext([
   inlineScript('utils.js.html'),
   inlineScript('budget.js.html'),
-  inlineScript('dashboard.js.html')
+  inlineScript('dashboard.js.html'),
+  inlineScript('invoices.js.html')
 ].join('\n'), cli, { filename: 'budget-client.js' });
 cli.AppCache.budgetCategories = srv.getBudgetCategories();
 cli.AppCache.businesses = db.Businesses;
@@ -310,6 +311,49 @@ check('the total row totals invoiced too', /total-row[\s\S]*?\$5,800\.00/.test(h
 check('the caveat about expenses and GST is stated',
   hoursHtml.indexOf('excludes expenses and GST') !== -1);
 check('no undefined or NaN in the hours table', !/undefined|NaN/.test(hoursHtml));
+
+// --- Printed invoice ---
+
+console.log('\nPrinted invoice');
+
+// renderInvoiceDetail writes into #invoice-tab-content, so capture that write.
+let printed = '';
+cli.document.getElementById = function() {
+  return { set innerHTML(v) { printed = v; }, get innerHTML() { return printed; } };
+};
+
+cli.renderInvoiceDetail({
+  invoice: { invoice_id: 'BC0526', created_date: '2026-05-31', date_from: '2026-05-01',
+    date_to: '2026-05-31', po_number: 'PO-4471', status: 'sent', include_gst: true,
+    gst_rate: 0.15, time_subtotal: 5000, subtotal: 5000, gst_amount: 750, total: 5750,
+    description: '', notes: '' },
+  business: { name: 'Auckland Transport', currency: 'NZD' },
+  myDetails: { business_name: 'Me Ltd', gst_number: '123-456-789', tax_number: '987-654-321',
+    bank_account: '12-3456-0000000-00', payment_terms: 'Due within 14 days' },
+  timeEntries: [], expenses: [], allocations: [],
+  subtotals: { time: 5000, expenses: 0 }
+});
+
+check('the PO number is printed', printed.indexOf('PO-4471') !== -1);
+check('it is labelled', printed.indexOf('PO #:') !== -1);
+check('the GST number is printed', printed.indexOf('123-456-789') !== -1);
+check('the IRD number is NOT printed', printed.indexOf('987-654-321') === -1);
+check('no leftover Tax # label', printed.indexOf('Tax #:') === -1);
+
+// An invoice with no PO must simply omit the line, not render an empty one.
+printed = '';
+cli.renderInvoiceDetail({
+  invoice: { invoice_id: 'BC0626', created_date: '2026-06-30', date_from: '2026-06-01',
+    date_to: '2026-06-30', po_number: '', status: 'draft', include_gst: false,
+    gst_rate: 0, time_subtotal: 100, subtotal: 100, gst_amount: 0, total: 100,
+    description: '', notes: '' },
+  business: { name: 'Auckland Transport', currency: 'NZD' },
+  myDetails: { business_name: 'Me Ltd', gst_number: '123-456-789' },
+  timeEntries: [], expenses: [], allocations: [],
+  subtotals: { time: 100, expenses: 0 }
+});
+check('no PO line when there is no PO', printed.indexOf('PO #:') === -1);
+check('the invoice still renders without one', printed.indexOf('BC0626') !== -1);
 
 console.log('\n' + passes + ' passed, ' + failures + ' failed');
 process.exit(failures > 0 ? 1 : 0);

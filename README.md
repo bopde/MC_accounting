@@ -32,7 +32,8 @@ A finance management web app built entirely on Google Apps Script with Google Sh
 ### 2. Invoices
 - Generate invoices from uninvoiced time entries and expenses for a business and date range.
 - Optional GST at a configurable rate (default 15%). Record tax already withheld by the payer.
-- Print-friendly invoice view with your details ("From"), client details ("Bill To"), itemised services grouped by work code, and expenses listed individually.
+- Optional **PO number**, defaulting from the selected contract but editable, and settable on an existing invoice via Edit.
+- Print-friendly invoice view with your details ("From"), client details ("Bill To"), itemised services grouped by work code, and expenses listed individually. Only the **GST number** is printed — the IRD number is kept in Settings for reference but stays off documents that go to clients.
 - Status flow: draft -> sent -> paid -> void.
 - Entries are marked with the invoice ID once invoiced, preventing double-billing.
 

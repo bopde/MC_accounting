@@ -332,6 +332,7 @@ function updateInvoice(params) {
 
   if (params.created_date !== undefined && params.created_date !== '') invoice.created_date = params.created_date;
   if (params.description !== undefined) invoice.description = params.description;
+  if (params.po_number !== undefined) invoice.po_number = String(params.po_number).trim();
   if (params.notes !== undefined) invoice.notes = params.notes;
   if (params.line_descriptions !== undefined) {
     invoice.line_descriptions = typeof params.line_descriptions === 'string'
