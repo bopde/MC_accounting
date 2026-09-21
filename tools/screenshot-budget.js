@@ -317,9 +317,11 @@ const SHOTS = [
   { file: 'money-flow-payment-panel.png', width: 1280,
     html: page(withPanel + history),
     caption: 'Recording a payment: full remaining or any part of it.' },
-  { file: 'money-flow-history.png', width: 1280,
-    html: page(overview + history.replace('<details class="flow-group history-group">',
-      '<details class="flow-group history-group" open>')),
+  // The history alone, at 1x: expanded it runs to several thousand pixels, and
+  // at 2x over the whole page the file is too large to be worth reviewing.
+  { file: 'money-flow-history.png', width: 1280, scale: 1,
+    html: page(history.replace('<details class="flow-group history-group">',
+      '<details class="flow-group history-group" open>'), { filters: false }),
     caption: 'History expanded: every payment, then every allocation per invoice.' },
   { file: 'money-flow-mobile.png', width: 420,
     html: page(overview + history),
@@ -339,7 +341,7 @@ const SHOTS = [
 
     const ctx = await browser.newContext({
       viewport: { width: shot.width, height: 1000 },
-      deviceScaleFactor: 2
+      deviceScaleFactor: shot.scale || 2
     });
     const pg = await ctx.newPage();
     await pg.goto('file://' + tmp, { waitUntil: 'load' });
