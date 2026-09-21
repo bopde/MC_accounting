@@ -10,6 +10,7 @@ function addTimeEntry(data) {
   if (!data.business_id || !data.date || !data.time_start || !data.time_end || !data.work_code) {
     throw new Error('Missing required fields.');
   }
+  data.date = requireDate(data.date, 'Date');
 
   var start = parseTime(data.date, data.time_start);
   var end = parseTime(data.date, data.time_end);
@@ -19,7 +20,8 @@ function addTimeEntry(data) {
   }
 
   if (end <= start) {
-    throw new Error('End time must be after start time.');
+    throw new Error('End time must be after start time. An entry cannot cross midnight — ' +
+      'log the two halves as separate entries.');
   }
 
   var hours = (end - start) / (1000 * 60 * 60);
@@ -50,9 +52,13 @@ function addTimeEntry(data) {
  * Add an expense entry.
  */
 function addExpense(data) {
-  if (!data.business_id || !data.date || !data.work_code) {
+  if (!data.business_id || !data.work_code) {
     throw new Error('Missing required fields.');
   }
+  // Guarded because nothing downstream would complain: an unparseable date
+  // writes fine and is then skipped by every date filter in the app, so the
+  // expense exists in the sheet and nowhere in the UI.
+  var date = requireDate(data.date, 'Date');
 
   var amount = Number(data.amount);
   if (isNaN(amount) || amount < 0) {
@@ -61,7 +67,7 @@ function addExpense(data) {
 
   return appendRow('Expenses', {
     business_id: data.business_id,
-    date: data.date,
+    date: date,
     amount: amount,
     description: data.description,
     work_code: data.work_code,
@@ -139,11 +145,15 @@ function updateTimeEntryLocked(data) {
   if (!data.business_id || !data.date || !data.time_start || !data.time_end || !data.work_code) {
     throw new Error('Missing required fields.');
   }
+  data.date = requireDate(data.date, 'Date');
 
   var start = parseTime(data.date, data.time_start);
   var end = parseTime(data.date, data.time_end);
   if (isNaN(start.getTime()) || isNaN(end.getTime())) throw new Error('Invalid date or time values.');
-  if (end <= start) throw new Error('End time must be after start time.');
+  if (end <= start) {
+    throw new Error('End time must be after start time. An entry cannot cross midnight — ' +
+      'log the two halves as separate entries.');
+  }
 
   var hours = Math.round((end - start) / (1000 * 60 * 60) * 100) / 100;
   var rate = Number(data.rate);
@@ -206,15 +216,16 @@ function updateExpenseLocked(data) {
     throw new Error('Cannot edit an invoiced expense. Void the invoice first.');
   }
 
-  if (!data.business_id || !data.date || !data.work_code) {
+  if (!data.business_id || !data.work_code) {
     throw new Error('Missing required fields.');
   }
+  var date = requireDate(data.date, 'Date');
 
   var amount = Number(data.amount);
   if (isNaN(amount) || amount < 0) throw new Error('Amount must be a non-negative number.');
 
   expense.business_id = data.business_id;
-  expense.date = data.date;
+  expense.date = date;
   expense.amount = amount;
   expense.description = data.description;
   expense.work_code = data.work_code;

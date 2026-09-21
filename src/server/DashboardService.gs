@@ -79,11 +79,23 @@ function getDashboardData(params) {
     var key = resolveCategoryKey(a);
     if (!key) return;
     if (!allocByKey[key]) allocByKey[key] = { allocated: 0, paid: 0, outstanding: 0 };
+    // Through allocationPaidAmount, not the status flag: a part-paid
+    // allocation is neither wholly paid nor wholly outstanding, and reading
+    // the flag here would make the Dashboard disagree with the Budget page
+    // the moment a payment covered less than a whole allocation.
     var amount = Number(a.amount) || 0;
-    var isPaid = normaliseAllocationStatus(a.status) === 'paid';
+    var paid = allocationPaidAmount(a);
     allocByKey[key].allocated += amount;
-    if (isPaid) allocByKey[key].paid += amount;
-    else allocByKey[key].outstanding += amount;
+    allocByKey[key].paid += paid;
+    allocByKey[key].outstanding += round2(amount - paid);
+  });
+
+  // Sub-cent dust from summing rounded halves of percentages, which would
+  // otherwise render as $0.00 sitting next to a non-zero progress bar.
+  Object.keys(allocByKey).forEach(function(k) {
+    allocByKey[k].allocated = round2(allocByKey[k].allocated);
+    allocByKey[k].paid = round2(allocByKey[k].paid);
+    allocByKey[k].outstanding = round2(allocByKey[k].outstanding);
   });
 
   invoices.forEach(function(inv) {
@@ -112,9 +124,11 @@ function getDashboardData(params) {
   summaries.forEach(function(s) {
     var mo = normaliseMonth(s.month);
     if (!mo) return;
-    if (toStr) {
-      if (mo + '-28' > toStr) return;
-    }
+    // Skip a month that has not started by the end of the range. Comparing
+    // against the 28th instead meant the month you are currently in never
+    // showed its balance — a dashboard filtered to "this month" hid the very
+    // figure you had just entered.
+    if (toStr && mo > toStr.slice(0, 7)) return;
     if (s.ending_balance === '' || s.ending_balance === null || s.ending_balance === undefined) return;
     var key = s.account_id;
     if (!latestByAccount[key] || mo > latestByAccount[key].month) {
@@ -142,53 +156,33 @@ function getDashboardData(params) {
     return true;
   });
 
+  // Attributed by the one shared rule (ContractService.attributeTimeToContracts)
+  // rather than a second copy of it here, which had drifted: untagged time
+  // inside two overlapping contracts was counted towards both.
+  var attributed = attributeTimeToContracts(contracts, timeEntriesRaw);
+  var now = new Date();
+
   var contractProgress = contracts.map(function(c) {
-    var contractId = c.contract_id;
-    var cBizId = c.business_id;
-    var cFromStr = dateOnly(c.date_from);
-    var cToStr = dateOnly(c.date_to);
-
-    var spent = 0, hrs = 0;
-    timeEntriesRaw.forEach(function(te) {
-      if (te.contract_id && idsMatch(te.contract_id, contractId)) {
-        spent += Number(te.line_total) || 0;
-        hrs += Number(te.hours) || 0;
-      } else if (idsMatch(te.business_id, cBizId) && !te.contract_id) {
-        var d = dateOnly(te.date);
-        if (d >= cFromStr && d <= cToStr) {
-          spent += Number(te.line_total) || 0;
-          hrs += Number(te.hours) || 0;
-        }
-      }
-    });
-
-    var value = Number(c.value) || 0;
-    var biz = bizMap[normalizeId(cBizId)];
-    var now = new Date();
-    var cFrom = new Date(now.getFullYear(), 0, 1);
-    var cTo = new Date(now.getFullYear(), 0, 1);
-    if (cFromStr) { var fp = cFromStr.split('-'); cFrom = new Date(+fp[0], +fp[1] - 1, +fp[2]); }
-    if (cToStr) { var tp = cToStr.split('-'); cTo = new Date(+tp[0], +tp[1] - 1, +tp[2]); }
-    var totalDays = Math.max(1, (cTo - cFrom) / 86400000);
-    var elapsedDays = Math.max(0, Math.min((now - cFrom) / 86400000, totalDays));
-    var daysRemaining = Math.max(0, Math.ceil((cTo - now) / 86400000));
+    var totals = attributed.byContract[normalizeId(c.contract_id)] || { spent: 0, hours: 0 };
+    var pace = contractPace(c, totals.spent, now);
+    var biz = bizMap[normalizeId(c.business_id)];
 
     return {
       contract_id: c.contract_id,
-      business_id: cBizId,
+      business_id: c.business_id,
       business_name: biz ? biz.name : 'Unknown',
       name: c.name,
       po_number: c.po_number,
       date_from: c.date_from,
       date_to: c.date_to,
-      value: value,
+      value: pace.value,
       currency: c.currency || 'NZD',
-      spent: spent,
-      hours: hrs,
-      days_remaining: daysRemaining,
-      total_days: Math.ceil(totalDays),
-      expected_pct: elapsedDays / totalDays,
-      actual_pct: value > 0 ? spent / value : 0
+      spent: totals.spent,
+      hours: totals.hours,
+      days_remaining: pace.days_remaining,
+      total_days: pace.total_days,
+      expected_pct: pace.expected_pct,
+      actual_pct: pace.actual_pct
     };
   });
 
@@ -198,7 +192,11 @@ function getDashboardData(params) {
     expenses: expenses,
     budget: budget,
     accountBalances: accountBalances,
-    contractProgress: contractProgress
+    contractProgress: contractProgress,
+    // Untagged time that two or more overlapping contracts could each claim.
+    // Counted against none of them, and reported so the gap is visible rather
+    // than looking like work that was never logged.
+    unattributedTime: attributed.ambiguous
   };
 }
 

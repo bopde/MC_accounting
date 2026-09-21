@@ -231,6 +231,7 @@ const RESPONSES = {
   payBudgetCategoriesFromClient: { payment_id: 'BP-002', amount: 400,
     category: 'Business Tax', allocations: 1 },
   undoBudgetPaymentFromClient: { success: true, amount: 750, category: 'GST' },
+  deallocateInvoiceFromClient: { success: true, removed: 11, invoice_id: 'BC0526' },
   getBudgetRules: [RULE, LEGACY_RULE],
   getAllBusinesses: [BUSINESS],
   getAccountSummariesForMonth: { current: [], previous: [] },
@@ -410,12 +411,24 @@ async function drive(label, fn) {
     panelHtml.slice(0, 200));
   check('the panel names the bucket and what is owed',
     panelHtml.indexOf('Pay: Tax to pay') !== -1 && panelHtml.indexOf('$1,400.00 outstanding') !== -1);
+  check('the panel submits as a payment whatever the settle mode',
+    panelHtml.indexOf('>Record payment</button>') !== -1);
   await drive('record a part payment', function() {
     doc.getElementById('pay-amount').value = '400';
     doc.getElementById('pay-date').value = '2026-06-05';
     doc.getElementById('pay-note').value = 'ASB 4471 | prov tax';
     cli.submitPayment();
   });
+  // A held bucket: its panel must read the same as a paid-out one.
+  await drive('the panel for a held bucket', function() {
+    cli.openPayPanel('pay-host-allocations', 'per_save,legacy_save', 'Save', 'hold', 208.41);
+  });
+  const heldPanel = doc.getElementById('pay-host-allocations').innerHTML;
+  check('a held bucket says Pay too',
+    heldPanel.indexOf('Pay: Save') !== -1 &&
+    heldPanel.indexOf('>Record payment</button>') !== -1 &&
+    heldPanel.indexOf('Set aside') === -1);
+
   await drive('the full-remaining shortcut', function() {
     cli.openPayPanel('pay-host-obligations', 'biz_tax', 'Tax to pay', 'pay', 1400);
     doc.getElementById('pay-amount').value = '1';
@@ -426,6 +439,7 @@ async function drive(label, fn) {
     'got ' + doc.getElementById('pay-amount').value);
   await drive('cancel closes the panel', function() { cli.closePayPanel(); });
   await drive('undo a payment', function() { cli.undoPayment('BP-001'); });
+  await drive('remove an allocation', function() { cli.removeAllocation('BC0526'); });
 
   // Both must refuse before reaching the server, so the error is immediate.
   const beforeRefusals = toasts.length;

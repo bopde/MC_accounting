@@ -279,7 +279,7 @@ function payableTile(row, cats, hostId, detail) {
 
   var settled = figures.allocated > 0 && figures.outstanding <= 0.004;
   var action = settled
-    ? '<span class="tile-action__done">' + escapeHtml(settleMode(settle).settledWord) + ' in full</span>'
+    ? '<span class="tile-action__done">paid in full</span>'
     : '<button type="button" class="btn-small btn-primary" onclick="openPayPanel(\'' +
         jsAttr(hostId) + '\',\'' + jsAttr(keys) + '\',\'' + jsAttr(row.label) + '\',\'' +
         jsAttr(settle) + '\',' + (figures.outstanding || 0) + ')">' + escapeHtml(verb) + '</button>';
@@ -302,15 +302,15 @@ function potAction(row, cats, hostId) {
   var settled = figures.allocated > 0 && figures.outstanding <= 0.004;
 
   var action = settled
-    ? '<span class="tile-action__done">' + escapeHtml(settleMode(settle).settledWord) + ' in full</span>'
+    ? '<span class="tile-action__done">paid in full</span>'
     : '<button type="button" class="btn-small btn-primary" onclick="openPayPanel(\'' +
         jsAttr(hostId) + '\',\'' + jsAttr(row.keys.join(',')) + '\',\'' + jsAttr(row.label) + '\',\'' +
         jsAttr(settle) + '\',' + (figures.outstanding || 0) + ')">' + escapeHtml(verb) + '</button>';
 
   return '<div class="pot-action">' +
     '<span class="pot-action__label">' + escapeHtml(row.label) + ' &mdash; ' +
-      formatCurrency(figures.outstanding) + ' still to ' + escapeHtml(verb.toLowerCase()) +
-      ', ' + formatCurrency(figures.paid) + ' of ' + formatCurrency(figures.allocated) + ' done' +
+      formatCurrency(figures.outstanding) + ' still to pay, ' +
+      formatCurrency(figures.paid) + ' of ' + formatCurrency(figures.allocated) + ' paid' +
     '</span>' +
     action +
   '</div>';
@@ -379,20 +379,20 @@ function renderMoneyMap(summary, cats) {
       '<h4>Business account</h4>' +
       line('Invoiced in', view.business.total, 'billed hours + GST') +
       line('Obligations out', bizOwed.allocated, formatCurrency(bizOwed.outstanding) + ' still to pay') +
-      line('Reserve kept', reserve.allocated, formatCurrency(reserve.outstanding) + ' still to set aside') +
+      line('Reserve kept', reserve.allocated, formatCurrency(reserve.outstanding) + ' still to pay') +
     '</article>' +
     '<div class="money-map__bridge">' +
       '<span class="money-map__bridge-label">Owner pay</span>' +
       '<span class="money-map__bridge-amount">' + formatCurrency(draw.allocated) + '</span>' +
       '<span class="money-map__bridge-arrow" aria-hidden="true">&rarr;</span>' +
-      '<span class="money-map__bridge-note">' + formatCurrency(draw.outstanding) + ' still to draw</span>' +
+      '<span class="money-map__bridge-note">' + formatCurrency(draw.outstanding) + ' still to pay</span>' +
     '</div>' +
     '<article class="money-map__col money-map__col--personal">' +
       '<h4>Personal account</h4>' +
       line('In', view.personal.total,
         'owner pay + ' + formatCurrency(view.soleTrader.total) + ' sole trader') +
       line('Obligations out', perOwed.allocated, formatCurrency(perOwed.outstanding) + ' still to pay') +
-      line('To allocate', personalPot.allocated, formatCurrency(personalPot.outstanding) + ' still to action') +
+      line('To allocate', personalPot.allocated, formatCurrency(personalPot.outstanding) + ' still to pay') +
     '</article>' +
   '</section>';
 }
@@ -473,7 +473,7 @@ function renderIncomeSection(cats) {
     sectionTitle('Total income', reserve.allocated + personalPot, 'after obligations') +
     '<div class="pot-grid">' +
       bigTile('Business: Reserve pot', reserve.allocated,
-        formatCurrency(reserve.paid) + ' set aside · ' + formatCurrency(reserve.outstanding) + ' to set aside') +
+        formatCurrency(reserve.paid) + ' paid · ' + formatCurrency(reserve.outstanding) + ' still to pay') +
       bigTile('Personal: Personal pot', personalPot,
         'from business ' + formatCurrency(fromBusiness.allocated) +
         ' · sole trader ' + formatCurrency(fromSoleTrader.allocated)) +
@@ -498,18 +498,18 @@ function renderAllocationsSection(cats) {
     'the draw out of the company, then how the personal pot splits</span></h3>';
 
   html += subHeading('Business: owner pay draw', draw.allocated,
-    formatCurrency(draw.outstanding) + ' still to draw');
+    formatCurrency(draw.outstanding) + ' still to pay');
   html += potAction({ label: 'Owner pay draw', settle: 'transfer', keys: ['owner_pay'] },
     cats, 'pay-host-allocations');
 
   html += subHeading('Personal', personalTotal.allocated,
-    formatCurrency(personalTotal.outstanding) + ' still to action');
+    formatCurrency(personalTotal.outstanding) + ' still to pay');
   html += '<div class="flow-grid">' +
     PERSONAL_ALLOCATIONS.map(function(row) {
       var legacy = sumCats(cats, [row.keys[1]]);
       var detail = legacy.allocated > 0
         ? 'incl. ' + formatCurrency(legacy.allocated) + ' sole trader'
-        : 'still to ' + settleShortVerb(row.settle).toLowerCase();
+        : 'still to pay';
       return payableTile(row, cats, 'pay-host-allocations', detail);
     }).join('') +
   '</div>';
@@ -727,7 +727,7 @@ function renderAllocationHistory(cats) {
 function renderCategoryBlock(cat) {
   var isWithheld = cat.isWithheld;
   var barPct = pctOf(cat.paid, cat.allocated);
-  var movedWord = settleMode(cat.settle).settledWord;
+  var movedWord = isWithheld ? 'withheld' : 'paid';
 
   var html = '<article class="category-block">' +
     '<header class="category-block__header">' +

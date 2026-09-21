@@ -496,6 +496,68 @@ function undoBudgetPayment(paymentId) {
 }
 
 /**
+ * Remove an invoice's budget allocations, so it can be re-allocated or voided.
+ *
+ * Until this existed, voiding an allocated invoice told the user to "remove
+ * them first" and there was no way to do that — a correction to an allocated
+ * invoice meant editing the spreadsheet by hand.
+ *
+ * Refused while any recorded payment touches those allocations: deleting them
+ * would leave a payment pointing at rows that no longer exist, and its Undo
+ * would then silently do nothing. The payments are named so they can be undone
+ * from the History section first.
+ */
+function deallocateInvoice(invoiceId) {
+  return withScriptLock(function() {
+    var invoice = findById('Invoices', invoiceId);
+    if (!invoice) throw new Error('Invoice not found: ' + invoiceId);
+
+    var allocations = getAll('BudgetAllocations').filter(function(a) {
+      return idsMatch(a.invoice_id, invoiceId);
+    });
+    if (allocations.length === 0) {
+      throw new Error('This invoice has no budget allocations to remove.');
+    }
+
+    var mine = {};
+    allocations.forEach(function(a) { mine[normalizeId(a.allocation_id)] = true; });
+
+    var blocking = budgetPaymentRows().filter(function(p) {
+      return parseCoveredAllocations(p.covered).some(function(c) {
+        return !!mine[normalizeId(c.allocation_id)];
+      });
+    });
+
+    if (blocking.length > 0) {
+      var named = blocking.slice(0, 3).map(function(p) {
+        return formatMoneyPlain(p.amount) + ' on ' + (dateOnly(p.payment_date) || 'an unknown date') +
+          ' (' + (p.category || 'unknown') + ')';
+      }).join('; ');
+      throw new Error('Cannot remove — ' + blocking.length + ' payment' +
+        (blocking.length === 1 ? '' : 's') + ' already settled part of this allocation: ' + named +
+        (blocking.length > 3 ? '; and more' : '') +
+        '. Undo them under Budget > Money Flow > History, then try again.');
+    }
+
+    // Descending, so deleting a row never shifts one still to be deleted.
+    allocations.sort(function(a, b) { return b._rowIndex - a._rowIndex; })
+      .forEach(function(a) { deleteRow('BudgetAllocations', a._rowIndex); });
+
+    // The invoice no longer follows any rule, so the Allocate tab offers it
+    // again rather than showing it as already done.
+    invoice.budget_rule_id = '';
+    updateRow('Invoices', invoice._rowIndex, invoice);
+
+    return { success: true, removed: allocations.length, invoice_id: invoice.invoice_id };
+  });
+}
+
+/** Plain money for an error message — no Utilities, no locale surprises. */
+function formatMoneyPlain(amount) {
+  return '$' + (Math.round((Number(amount) || 0) * 100) / 100).toFixed(2);
+}
+
+/**
  * Get budget summary across all invoices, grouped by scope.
  *
  * Owner Pay is reported separately as `bridge` and excluded from every money

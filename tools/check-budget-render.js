@@ -259,7 +259,8 @@ function verbFor(label) {
     '<[\\s\\S]*?tile-action">(.*?)</div>').exec(html);
   return m ? m[1] : '';
 }
-check('Set aside on Save (a held bucket)', verbFor('Save').indexOf('>Set aside<') !== -1);
+// Every button says Pay, whatever the bucket's settle mode — one act, one word.
+check('Pay on Save (a held bucket)', verbFor('Save').indexOf('>Pay<') !== -1);
 // The draw and the Reserve pot are action bars, not boxes: their figures are
 // already in the subheading and the pot tile above them.
 function potActionFor(label) {
@@ -267,8 +268,15 @@ function potActionFor(label) {
     ' &mdash;[\\s\\S]*?</span>(.*?)</div>').exec(html);
   return m ? m[1] : '';
 }
-check('Transfer on the owner pay draw', potActionFor('Owner pay draw').indexOf('>Transfer<') !== -1);
-check('Set aside on the Reserve pot', potActionFor('Reserve pot').indexOf('>Set aside<') !== -1);
+check('Pay on the owner pay draw', potActionFor('Owner pay draw').indexOf('>Pay<') !== -1);
+check('Pay on the Reserve pot', potActionFor('Reserve pot').indexOf('>Pay<') !== -1);
+check('no bucket offers a different verb',
+  html.indexOf('>Set aside<') === -1 && html.indexOf('>Transfer<') === -1);
+check('one phrase for money still owed, everywhere on the page',
+  html.indexOf('still to set aside') === -1 &&
+  html.indexOf('still to draw') === -1 &&
+  html.indexOf('still to action') === -1 &&
+  (html.match(/still to pay/g) || []).length >= 6);
 check('the Reserve figure is not repeated in a second box',
   html.indexOf('mini-tile__label">Reserve') === -1);
 check('Pay on Donate (a paid-out bucket)', verbFor('Donate').indexOf('>Pay<') !== -1);

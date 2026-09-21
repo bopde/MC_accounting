@@ -366,6 +366,8 @@ For expenses: switch to the **Expenses** tab, select business and work code, ent
 4. Click **Confirm allocation** to write the rows. Buckets that come to zero are skipped.
 5. In **Budget > Money Flow**, record the money as you move it — one payment per bucket, not per invoice. See below.
 
+To undo an allocation — to correct it, or because the invoice needs voiding — open the invoice and use **Remove allocation**. It is refused while any recorded payment has settled part of it; undo those under **Money Flow → History** first.
+
 ### Reading the Money Flow tab
 
 An overview first and a ledger second. Everything above the history is totals with one action each; nothing there asks you to settle invoices one at a time.
@@ -382,7 +384,7 @@ An overview first and a ledger second. Everything above the history is totals wi
 
 #### Recording a payment
 
-Money leaves an account in single payments, not invoice by invoice, so that is how it is recorded. Each box's button — **Pay**, **Set aside** or **Transfer**, from the bucket's settle mode — opens a panel prefilled with the full outstanding amount:
+Money leaves an account in single payments, not invoice by invoice, so that is how it is recorded. Every box's button says **Pay**, whatever the bucket is — paying GST, setting money aside in Reserve and drawing owner pay are one act (money leaving the account it is sitting in), and three different words made the page read as three mechanisms. The settle mode still decides whether a bucket has a button at all: withheld money never arrived, so it has none. The button opens a panel prefilled with the full outstanding amount:
 
 1. **Pay it all**: leave the amount as it is (or click **Use full $X**) and record it.
 1. **Pay part of it**: type any smaller amount. The rest stays outstanding.
@@ -417,6 +419,12 @@ Earned and Invoiced are deliberately different sets of work: Earned is time logg
 
 The same figures, condensed to three groups: **Total revenue** (business and personal, with the same overlap caveat), **Total obligations** (business and personal, outstanding only), and **Personal allocations** (spend, save, invest, donate). The bucket groupings are shared globals in `utils.js.html`, so the Dashboard and the Budget page cannot drift apart.
 
+### Contract progress
+
+Time tagged with a contract belongs to that contract. Untagged time is attributed to the client's contract whose period covers its date — **but only when exactly one does**. Where two contracts for the same client overlap, nothing in the data says which one the work was for, so it is counted against neither and reported under the Contract Progress tile instead. Set the contract on those entries under **Hours** to bring them in.
+
+The rule lives in one place (`attributeTimeToContracts` in `ContractService.gs`); the Dashboard and the Contracts tab both call it, so they cannot report different spend for the same contract.
+
 ### Account Monitoring
 
 1. Go to **Accounts > Monthly**
@@ -441,6 +449,7 @@ MC/
 │   ├── check-budget-render.js      # Budget page + Dashboard markup and totals
 │   ├── check-invoice-ids.js        # invoice number format and sequencing
 │   ├── check-client-smoke.js       # every client page renders without throwing
+│   ├── check-app-flows.js          # invoice lines, voiding, dashboard agreement, guards
 │   └── screenshot-budget.js        # renders the Money Flow tab to PNGs for review
 └── src/
     ├── appsscript.json       # Apps Script manifest (runtime config, webapp settings)

@@ -59,6 +59,10 @@ function getActiveRules() {
 // --- Businesses ---
 
 function addBusiness(data) {
+  // An id from the client would append a SECOND row under an existing one.
+  stripGeneratedId(data, 'business_id');
+
+  if (!String(data.name || '').trim()) throw new Error('Business name is required.');
   if (valueExists('Businesses', 'name', data.name)) {
     throw new Error('A business with this name already exists.');
   }
@@ -117,6 +121,10 @@ function assertInvoiceCodeUsable(raw) {
 }
 
 function updateBusiness(data) {
+  return withScriptLock(function() { return updateBusinessLocked(data); });
+}
+
+function updateBusinessLocked(data) {
   var biz = findById('Businesses', data.business_id);
   if (!biz) throw new Error('Business not found: ' + data.business_id);
 
@@ -172,20 +180,25 @@ function addWorkCode(data) {
 }
 
 function updateWorkCode(data) {
-  var code = findById('WorkCodes', data.code_id);
-  if (!code) throw new Error('Work code not found: ' + data.code_id);
+  return withScriptLock(function() {
+    var code = findById('WorkCodes', data.code_id);
+    if (!code) throw new Error('Work code not found: ' + data.code_id);
 
-  if (data.description !== undefined) code.description = data.description;
-  if (data.category !== undefined) code.category = data.category;
-  if (data.contract_id !== undefined) code.contract_id = data.contract_id;
+    if (data.description !== undefined) code.description = data.description;
+    if (data.category !== undefined) code.category = data.category;
+    if (data.contract_id !== undefined) code.contract_id = data.contract_id;
 
-  updateRow('WorkCodes', code._rowIndex, code);
-  return code;
+    updateRow('WorkCodes', code._rowIndex, code);
+    return code;
+  });
 }
 
 // --- Accounts ---
 
 function addAccount(data) {
+  stripGeneratedId(data, 'account_id');
+
+  if (!String(data.name || '').trim()) throw new Error('Account name is required.');
   if (valueExists('Accounts', 'name', data.name)) {
     throw new Error('An account with this name already exists.');
   }
@@ -197,26 +210,38 @@ function addAccount(data) {
 // --- Budget Rules ---
 
 function addBudgetRule(data) {
+  stripGeneratedId(data, 'rule_id');
+
   // New rules are company rules unless told otherwise; only pre-existing rows
   // with a blank model column are treated as sole-trader.
   if (!data.model) data.model = MODEL_COMPANY;
   validateBudgetRule(data);
   data.active = true;
 
-  if (data.is_default) {
-    var existing = getAll('BudgetRules');
-    existing.forEach(function(r) {
-      if (r.is_default) {
-        r.is_default = false;
-        updateRow('BudgetRules', r._rowIndex, r);
-      }
-    });
-  }
+  // Locked: clearing the other defaults and adding this one is a single act.
+  // Interleaved, two saves could leave two defaults or none, and the Allocate
+  // tab silently picks whichever rule it finds first.
+  return withScriptLock(function() {
+    if (data.is_default) clearDefaultRule(null);
+    return appendRow('BudgetRules', data);
+  });
+}
 
-  return appendRow('BudgetRules', data);
+/** Take is_default off every rule except the one keeping it. */
+function clearDefaultRule(keepRuleId) {
+  getAll('BudgetRules').forEach(function(r) {
+    if (!r.is_default) return;
+    if (keepRuleId && String(r.rule_id) === String(keepRuleId)) return;
+    r.is_default = false;
+    updateRow('BudgetRules', r._rowIndex, r);
+  });
 }
 
 function updateBudgetRule(data) {
+  return withScriptLock(function() { return updateBudgetRuleLocked(data); });
+}
+
+function updateBudgetRuleLocked(data) {
   var rule = findById('BudgetRules', data.rule_id);
   if (!rule) throw new Error('Budget rule not found: ' + data.rule_id);
 
@@ -225,15 +250,7 @@ function updateBudgetRule(data) {
   data.model = ruleModel(rule);
   validateBudgetRule(data);
 
-  if (data.is_default) {
-    var existing = getAll('BudgetRules');
-    existing.forEach(function(r) {
-      if (r.is_default && r.rule_id !== data.rule_id) {
-        r.is_default = false;
-        updateRow('BudgetRules', r._rowIndex, r);
-      }
-    });
-  }
+  if (data.is_default) clearDefaultRule(data.rule_id);
 
   rule.name = data.name;
   rule.model = data.model;
@@ -266,6 +283,10 @@ function getMyDetails() {
 }
 
 function saveMyDetails(data) {
+  return withScriptLock(function() { return saveMyDetailsLocked(data); });
+}
+
+function saveMyDetailsLocked(data) {
   var ALLOWED_KEYS = [
     'business_name', 'contact_name', 'email', 'phone', 'address',
     'tax_number', 'gst_number', 'bank_account', 'payment_terms'

@@ -73,7 +73,7 @@ function renderDashContent() {
   var html = '';
   html += dashHours(timeEntries, invoices, bizMap);
   html += '<div id="dash-chart-area">' + dashChart(timeEntries, bizMap) + '</div>';
-  html += dashContracts(contractProgress);
+  html += dashContracts(contractProgress, data.unattributedTime);
   if (data.budget && data.budget.length > 0) {
     html += dashBudget(data.budget);
   }
@@ -409,7 +409,12 @@ function dashHours(timeEntries, invoices, bizMap) {
   return html;
 }
 
-function dashContracts(contracts) {
+/**
+ * @param unattributed {spent, hours, entries} — untagged time that two or more
+ *        overlapping contracts could each claim, so it counts towards none of
+ *        them. Shown rather than silently missing from every bar.
+ */
+function dashContracts(contracts, unattributed) {
   var html = '<article><header><h3 style="margin:0;">Contract Progress</h3>' +
     '<p class="muted small" style="margin:0.25rem 0 0;">Not affected by date selection</p></header>';
 
@@ -452,7 +457,20 @@ function dashContracts(contracts) {
     '</div>';
   });
 
-  html += '</div></article>';
+  html += '</div>';
+
+  var stray = unattributed || {};
+  if ((stray.entries || 0) > 0) {
+    html += '<p class="muted small" style="margin:0.6rem 0 0;">' +
+      formatCurrency(stray.spent) + ' across ' + Number(stray.hours).toFixed(1) +
+      ' hrs (' + stray.entries + ' entr' + (stray.entries === 1 ? 'y' : 'ies') +
+      ') is not counted above: it has no contract set and falls inside more than one ' +
+      'overlapping contract, so there is nothing to say which it belongs to. ' +
+      'Set the contract on those entries under Hours.' +
+    '</p>';
+  }
+
+  html += '</article>';
   return html;
 }
 

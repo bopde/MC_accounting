@@ -59,25 +59,21 @@ function settleMode(settle) {
 }
 
 /**
- * The verb on a Money Flow action button. Shorter than settleActionLabel
- * because the button sits under a figure that already says what it is.
+ * The verb on a Money Flow action button, and the same act as a noun.
+ *
+ * Every button says "Pay", whatever the bucket's settle mode. Pay / Set aside
+ * / Transfer described the same act — money leaving the account it is sitting
+ * in — in three words, which made the page read as three mechanisms when
+ * there is only one. The settle mode still decides whether a bucket HAS a
+ * button (withheld money does not) and still drives the wording where it is
+ * describing what happened rather than offering an action.
  */
-var SETTLE_SHORT_VERBS = { pay: 'Pay', hold: 'Set aside', transfer: 'Transfer', auto_paid: '' };
-
 function settleShortVerb(settle) {
-  var verb = SETTLE_SHORT_VERBS[settle];
-  return verb === undefined ? 'Pay' : verb;
+  return settle === 'auto_paid' ? '' : 'Pay';
 }
 
-/**
- * The same act as a noun, for "Record a ___". The verb does not survive the
- * change of grammar — "Record pay" is not English.
- */
-var SETTLE_NOUNS = { pay: 'payment', hold: 'set-aside', transfer: 'transfer', auto_paid: '' };
-
 function settleNoun(settle) {
-  var noun = SETTLE_NOUNS[settle];
-  return noun === undefined ? 'payment' : noun;
+  return settle === 'auto_paid' ? '' : 'payment';
 }
 
 function settleActionLabel(settle) {

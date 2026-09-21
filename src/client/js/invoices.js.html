@@ -288,10 +288,36 @@ function renderInvoiceDetail(data) {
         '<td><span class="badge badge-' + escapeHtml(status) + '">' + escapeHtml(status) + '</span></td>' +
         '</tr>';
     });
-    html += '</tbody></table></div></section>';
+    html += '</tbody></table></div>' +
+      '<p class="muted small">Allocated money is settled under Budget &rarr; Money Flow. ' +
+      'Removing the allocation puts this invoice back on the Allocate tab, and is what ' +
+      'lets a paid invoice be voided.</p>' +
+      '<div class="form-actions">' +
+        '<button type="button" class="btn-small btn-subtle" onclick="removeAllocation(\'' +
+          jsAttr(inv.invoice_id) + '\')">Remove allocation</button>' +
+      '</div>' +
+    '</section>';
   }
 
   content.innerHTML = html;
+}
+
+/**
+ * Remove an invoice's budget allocations.
+ *
+ * Voiding an allocated invoice has always been refused with "remove them
+ * first", and until now there was no way to do that from the app at all.
+ */
+function removeAllocation(invoiceId) {
+  if (!confirm('Remove this invoice\'s budget allocations?\n\n' +
+    'The invoice goes back to the Allocate tab so it can be allocated again. ' +
+    'Refused if any payment has already settled part of it — undo those first.')) return;
+
+  serverCall('deallocateInvoiceFromClient', invoiceId).then(function(result) {
+    showToast('Removed ' + result.removed + ' allocation' + (result.removed === 1 ? '' : 's'));
+    App.invalidate(['budget', 'dashboard']);
+    viewInvoice(invoiceId);
+  }).catch(function(err) { showToast(err.message, 'error'); });
 }
 
 // --- Edit Invoice ---

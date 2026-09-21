@@ -76,6 +76,14 @@ function undoBudgetPaymentFromClient(paymentId) {
 }
 
 /**
+ * Remove an invoice's budget allocations so it can be re-allocated or voided.
+ * @param {string} invoiceId
+ */
+function deallocateInvoiceFromClient(invoiceId) {
+  return deallocateInvoice(String(invoiceId));
+}
+
+/**
  * Toggle active status of a reference entity (Business, WorkCode, Account).
  * @param {string} params - "sheetName|rowIndex|active"
  */
