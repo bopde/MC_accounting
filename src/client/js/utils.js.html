@@ -58,6 +58,28 @@ function settleMode(settle) {
   return modes[settle] || { key: settle, groupLabel: 'Other', verb: 'Mark Paid', settledWord: 'moved' };
 }
 
+/**
+ * The verb on a Money Flow action button. Shorter than settleActionLabel
+ * because the button sits under a figure that already says what it is.
+ */
+var SETTLE_SHORT_VERBS = { pay: 'Pay', hold: 'Set aside', transfer: 'Transfer', auto_paid: '' };
+
+function settleShortVerb(settle) {
+  var verb = SETTLE_SHORT_VERBS[settle];
+  return verb === undefined ? 'Pay' : verb;
+}
+
+/**
+ * The same act as a noun, for "Record a ___". The verb does not survive the
+ * change of grammar — "Record pay" is not English.
+ */
+var SETTLE_NOUNS = { pay: 'payment', hold: 'set-aside', transfer: 'transfer', auto_paid: '' };
+
+function settleNoun(settle) {
+  var noun = SETTLE_NOUNS[settle];
+  return noun === undefined ? 'payment' : noun;
+}
+
 function settleActionLabel(settle) {
   return settleMode(settle).verb || 'Mark Paid';
 }

@@ -167,8 +167,8 @@ function budgetSummaryFixture() {
       settle: def.settle, isTransfer: !!def.isTransfer, isWithheld: def.settle === 'auto_paid',
       allocated: amount, paid: 0, outstanding: amount,
       items: [{ allocation_id: 'BA-' + key, invoice_id: 'BC0526',
-        business_name: "Bob's Consulting", amount: amount, status: 'allocated',
-        transfer_date: '', notes: '' }]
+        business_name: "Bob's Consulting", amount: amount, paid: 0,
+        outstanding: amount, status: 'allocated', transfer_date: '', notes: '' }]
     };
   }
   return {
@@ -185,7 +185,10 @@ function budgetSummaryFixture() {
     ],
     categories: [], bridge: { allocated: 3050, paid: 0, outstanding: 3050 },
     accountHoldings: { business: 2700, personal: 3050, legacy: 0 },
-    totals: { allocated: 5750, paid: 0, outstanding: 5750, allocationCount: 10 }
+    totals: { allocated: 5750, paid: 0, outstanding: 5750, allocationCount: 10 },
+    payments: [{ payment_id: 'BP-001', payment_date: '2026-06-02', category: 'GST',
+      category_key: 'biz_gst', scope: 'business', amount: 750,
+      notes: 'ASB 4471 | GST Q2', allocations: 1 }]
   };
 }
 
@@ -225,6 +228,9 @@ const RESPONSES = {
   },
   getUninvoicedItems: { timeEntries: [TIME_ENTRY], expenses: [EXPENSE] },
   getBudgetSummary: budgetSummaryFixture(),
+  payBudgetCategoriesFromClient: { payment_id: 'BP-002', amount: 400,
+    category: 'Business Tax', allocations: 1 },
+  undoBudgetPaymentFromClient: { success: true, amount: 750, category: 'GST' },
   getBudgetRules: [RULE, LEGACY_RULE],
   getAllBusinesses: [BUSINESS],
   getAccountSummariesForMonth: { current: [], previous: [] },
@@ -390,6 +396,48 @@ async function drive(label, fn) {
   doc.getElementById('ba-invoice').value = 'BC0526';
   doc.getElementById('ba-rule').value = 'BR-001';
   await drive('allocation preview', function() { cli.previewAllocation(); });
+
+  console.log('\nRecording a payment');
+  await drive('budget > money flow', function() { cli.showBudgetTab('summary'); });
+  await drive('open the payment panel', function() {
+    cli.openPayPanel('pay-host-obligations', 'biz_tax', 'Tax to pay', 'pay', 1400);
+  });
+  // Read off the markup, not the field: this DOM stub does not parse innerHTML
+  // into elements, so a value written as an attribute never reaches .value.
+  const panelHtml = doc.getElementById('pay-host-obligations').innerHTML;
+  check('the panel prefills the full outstanding amount',
+    panelHtml.indexOf('id="pay-amount" step="0.01" min="0.01" value="1400.00"') !== -1,
+    panelHtml.slice(0, 200));
+  check('the panel names the bucket and what is owed',
+    panelHtml.indexOf('Pay: Tax to pay') !== -1 && panelHtml.indexOf('$1,400.00 outstanding') !== -1);
+  await drive('record a part payment', function() {
+    doc.getElementById('pay-amount').value = '400';
+    doc.getElementById('pay-date').value = '2026-06-05';
+    doc.getElementById('pay-note').value = 'ASB 4471 | prov tax';
+    cli.submitPayment();
+  });
+  await drive('the full-remaining shortcut', function() {
+    cli.openPayPanel('pay-host-obligations', 'biz_tax', 'Tax to pay', 'pay', 1400);
+    doc.getElementById('pay-amount').value = '1';
+    cli.payFullRemaining();
+  });
+  check('the shortcut fills in the outstanding amount',
+    doc.getElementById('pay-amount').value === '1400.00',
+    'got ' + doc.getElementById('pay-amount').value);
+  await drive('cancel closes the panel', function() { cli.closePayPanel(); });
+  await drive('undo a payment', function() { cli.undoPayment('BP-001'); });
+
+  // Both must refuse before reaching the server, so the error is immediate.
+  const beforeRefusals = toasts.length;
+  cli.openPayPanel('pay-host-obligations', 'biz_tax', 'Tax to pay', 'pay', 1400);
+  doc.getElementById('pay-amount').value = '0';
+  cli.submitPayment();
+  doc.getElementById('pay-amount').value = '99999';
+  cli.submitPayment();
+  const refusals = toasts.slice(beforeRefusals).filter(function(t) { return t.type === 'error'; });
+  check('a zero and an over-payment are both refused client-side',
+    refusals.length === 2, 'got ' + refusals.length + ' refusals');
+  cli.closePayPanel();
 
   doc.getElementById('inv-business').value = 'BIZ-001';
   doc.getElementById('inv-from').value = '2026-05-01';

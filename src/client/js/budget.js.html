@@ -2,13 +2,23 @@
 /**
  * Budget Allocations module.
  *
- * The Money Flow tab reads top to bottom as four sections:
+ * The Money Flow tab is an overview first and a ledger second:
+ *   0. Money map         — the journey in one band: what the company invoiced,
+ *                          what it owes and keeps, what it draws across to you,
+ *                          and what happens on the personal side
  *   1. Revenue           — two overlapping views: what the company invoiced,
  *                          and what reached you (owner pay + sole trader)
  *   2. Total obligations — tax, GST and ACC owed, split business vs personal
  *   3. Total income      — what is left: the business Reserve and personal pots
- *   4. Allocations       — the owner pay draw, and how the personal pot splits,
- *                          each bucket a box listing its allocations per invoice
+ *   4. Allocations       — the owner pay draw and how the personal pot splits
+ *   5. History           — collapsed: every payment made, and every allocation
+ *                          itemised per invoice
+ *
+ * Sections 2-4 are totals with one action each. Money leaves an account in
+ * single payments, not invoice by invoice, so a payment is recorded against a
+ * BUCKET — in full or for any part of what is outstanding — and the server
+ * applies it to that bucket's oldest unpaid invoices. Nothing above the
+ * history asks the user to settle allocations one row at a time.
  *
  * The sections reconcile on invoiced revenue (business + sole trader; the
  * personal view overlaps it and plays no part in the identity):
@@ -24,8 +34,6 @@
  * registry (BudgetCategories.gs) via AppCache.budgetCategories. This file does
  * no allocation maths — the preview is computed by the same server code that
  * writes the allocations.
- *
- * Stored status model: allocated -> paid.
  */
 
 // The bucket groupings both the Budget page and the Dashboard render from live
@@ -57,6 +65,16 @@ function showBudgetTab(tab) {
 
 // --- Money Flow ---
 
+/**
+ * The date range the figures on screen were built from. Payments are applied
+ * to the same range, so "pay the remaining" settles exactly what is shown and
+ * never reaches into a period the user is not looking at.
+ */
+var BudgetRange = { from: '', to: '' };
+
+/** The bucket the open payment panel is for. */
+var BudgetPay = { keys: '', label: '', settle: '', outstanding: 0 };
+
 function renderBudgetSummary() {
   var content = document.getElementById('budget-tab-content');
 
@@ -70,6 +88,9 @@ function renderBudgetSummary() {
     AppState.dateFrom = range.from;
     AppState.dateTo = range.to;
   }
+
+  BudgetRange = { from: AppState.dateFrom, to: AppState.dateTo };
+  BudgetPay = { keys: '', label: '', settle: '', outstanding: 0 };
 
   content.innerHTML =
     '<div class="filters">' +
@@ -95,10 +116,12 @@ function renderBudgetSummary() {
 
     var cats = catByKey(summary);
     body.innerHTML =
+      renderMoneyMap(summary, cats) +
       renderRevenueSection(summary, cats) +
       renderObligationsSection(cats) +
       renderIncomeSection(cats) +
-      renderAllocationsSection(cats);
+      renderAllocationsSection(cats) +
+      renderHistorySection(summary, cats);
   }).catch(function(err) {
     var body = document.getElementById('budget-summary-body');
     if (body) body.innerHTML = '<p class="error">Error: ' + escapeHtml(err.message) + '</p>';
@@ -200,6 +223,13 @@ function revenueViews(summary, cats) {
   };
 }
 
+/** Every category key that sits behind a named group of boxes. */
+function keysOf(rows) {
+  var keys = [];
+  rows.forEach(function(row) { keys = keys.concat(row.keys); });
+  return keys;
+}
+
 // --- Box markup (the pre-existing tile styles) ---
 
 function sectionTitle(label, amount, note) {
@@ -233,6 +263,64 @@ function owedTile(label, figures, detail) {
   '</div>';
 }
 
+/**
+ * An owedTile with the action that settles it.
+ *
+ * The button opens one payment panel for the whole bucket rather than a row
+ * per invoice: money leaves the account in single payments, so that is how it
+ * is recorded here. `keys` is every registry key behind the box, which is more
+ * than one wherever a company bucket merges with its sole-trader counterpart.
+ */
+function payableTile(row, cats, hostId, detail) {
+  var figures = sumCats(cats, row.keys);
+  var settle = row.settle || 'pay';
+  var verb = settleShortVerb(settle);
+  var keys = row.keys.join(',');
+
+  var settled = figures.allocated > 0 && figures.outstanding <= 0.004;
+  var action = settled
+    ? '<span class="tile-action__done">' + escapeHtml(settleMode(settle).settledWord) + ' in full</span>'
+    : '<button type="button" class="btn-small btn-primary" onclick="openPayPanel(\'' +
+        jsAttr(hostId) + '\',\'' + jsAttr(keys) + '\',\'' + jsAttr(row.label) + '\',\'' +
+        jsAttr(settle) + '\',' + (figures.outstanding || 0) + ')">' + escapeHtml(verb) + '</button>';
+
+  return '<div class="tile-with-action">' +
+    owedTile(row.label, figures, detail) +
+    '<div class="tile-action">' + action + '</div>' +
+  '</div>';
+}
+
+/**
+ * The action for a bucket whose figures are already on screen in a big tile.
+ * A second full box would repeat the same number twice in a row, so this is
+ * the button and nothing else.
+ */
+function potAction(row, cats, hostId) {
+  var figures = sumCats(cats, row.keys);
+  var settle = row.settle || 'pay';
+  var verb = settleShortVerb(settle);
+  var settled = figures.allocated > 0 && figures.outstanding <= 0.004;
+
+  var action = settled
+    ? '<span class="tile-action__done">' + escapeHtml(settleMode(settle).settledWord) + ' in full</span>'
+    : '<button type="button" class="btn-small btn-primary" onclick="openPayPanel(\'' +
+        jsAttr(hostId) + '\',\'' + jsAttr(row.keys.join(',')) + '\',\'' + jsAttr(row.label) + '\',\'' +
+        jsAttr(settle) + '\',' + (figures.outstanding || 0) + ')">' + escapeHtml(verb) + '</button>';
+
+  return '<div class="pot-action">' +
+    '<span class="pot-action__label">' + escapeHtml(row.label) + ' &mdash; ' +
+      formatCurrency(figures.outstanding) + ' still to ' + escapeHtml(verb.toLowerCase()) +
+      ', ' + formatCurrency(figures.paid) + ' of ' + formatCurrency(figures.allocated) + ' done' +
+    '</span>' +
+    action +
+  '</div>';
+}
+
+/** Where a payment panel opens. One per section, filled on demand. */
+function payHost(id) {
+  return '<div class="pay-host" id="' + escapeHtml(id) + '"></div>';
+}
+
 function pctOf(part, total) {
   if (!total || total === 0) return '0%';
   return ((Number(part) / Number(total)) * 100).toFixed(0) + '%';
@@ -257,6 +345,56 @@ function subHeading(label, amount, note) {
     ' <span class="section-total section-total--sm">' + formatCurrency(amount || 0) + '</span>' +
     (note ? ' <span class="muted small">' + escapeHtml(note) + '</span>' : '') +
     '</h4>';
+}
+
+// --- The money map: how business money becomes personal money ---
+
+/**
+ * One band at the top of the page tracing the whole journey: what the company
+ * invoiced, what it owes and keeps, what it draws across to you, and what
+ * happens on the personal side.
+ *
+ * Every figure here appears again in the sections below — this is the shape of
+ * the thing, not a separate set of numbers.
+ */
+function renderMoneyMap(summary, cats) {
+  var view = revenueViews(summary, cats);
+  var draw = catOf(cats, 'owner_pay');
+  var reserve = catOf(cats, 'biz_reserve');
+
+  var bizOwed = sumCats(cats, keysOf(BIZ_OBLIGATIONS));
+  var perOwed = sumCats(cats, keysOf(PERSONAL_OBLIGATIONS));
+  var personalPot = sumCats(cats, keysOf(PERSONAL_ALLOCATIONS));
+
+  function line(label, amount, note) {
+    return '<div class="money-map__line">' +
+      '<span class="money-map__line-label">' + escapeHtml(label) + '</span>' +
+      '<span class="money-map__line-amount">' + formatCurrency(amount || 0) + '</span>' +
+      (note ? '<span class="money-map__line-note">' + escapeHtml(note) + '</span>' : '') +
+    '</div>';
+  }
+
+  return '<section class="money-map">' +
+    '<article class="money-map__col money-map__col--business">' +
+      '<h4>Business account</h4>' +
+      line('Invoiced in', view.business.total, 'billed hours + GST') +
+      line('Obligations out', bizOwed.allocated, formatCurrency(bizOwed.outstanding) + ' still to pay') +
+      line('Reserve kept', reserve.allocated, formatCurrency(reserve.outstanding) + ' still to set aside') +
+    '</article>' +
+    '<div class="money-map__bridge">' +
+      '<span class="money-map__bridge-label">Owner pay</span>' +
+      '<span class="money-map__bridge-amount">' + formatCurrency(draw.allocated) + '</span>' +
+      '<span class="money-map__bridge-arrow" aria-hidden="true">&rarr;</span>' +
+      '<span class="money-map__bridge-note">' + formatCurrency(draw.outstanding) + ' still to draw</span>' +
+    '</div>' +
+    '<article class="money-map__col money-map__col--personal">' +
+      '<h4>Personal account</h4>' +
+      line('In', view.personal.total,
+        'owner pay + ' + formatCurrency(view.soleTrader.total) + ' sole trader') +
+      line('Obligations out', perOwed.allocated, formatCurrency(perOwed.outstanding) + ' still to pay') +
+      line('To allocate', personalPot.allocated, formatCurrency(personalPot.outstanding) + ' still to action') +
+    '</article>' +
+  '</section>';
 }
 
 // --- Header 1: Revenue ---
@@ -291,31 +429,24 @@ function renderRevenueSection(summary, cats) {
 
 function renderObligationsSection(cats) {
   function column(label, rows) {
-    var keys = [];
-    rows.forEach(function(row) { keys = keys.concat(row.keys); });
-    var subtotal = sumCats(cats, keys);
+    var subtotal = sumCats(cats, keysOf(rows));
 
     var tiles = '<div class="flow-grid flow-grid--stack">' +
       rows.map(function(row) {
-        var figures = sumCats(cats, row.keys);
         // Name the sole-trader portion when there is one, so a merged figure
         // never looks like it all came from the company.
         var legacy = row.legacyKeys ? sumCats(cats, row.legacyKeys) : null;
         var detail = (legacy && legacy.allocated > 0)
           ? 'incl. ' + formatCurrency(legacy.allocated) + ' sole trader'
           : 'still to pay';
-        return owedTile(row.label, figures, detail);
+        return payableTile(row, cats, 'pay-host-obligations', detail);
       }).join('') +
     '</div>';
 
     return subCard(label, subtotal.outstanding, 'still to pay', tiles);
   }
 
-  var allKeys = [];
-  BIZ_OBLIGATIONS.concat(PERSONAL_OBLIGATIONS).forEach(function(row) {
-    allKeys = allKeys.concat(row.keys);
-  });
-  var total = sumCats(cats, allKeys);
+  var total = sumCats(cats, keysOf(BIZ_OBLIGATIONS.concat(PERSONAL_OBLIGATIONS)));
 
   return '<section class="flow-group">' +
     sectionTitle('Total obligations', total.outstanding, 'still to pay') +
@@ -323,6 +454,7 @@ function renderObligationsSection(cats) {
       column('Business', BIZ_OBLIGATIONS) +
       column('Personal', PERSONAL_OBLIGATIONS) +
     '</div>' +
+    payHost('pay-host-obligations') +
   '</section>';
 }
 
@@ -346,6 +478,9 @@ function renderIncomeSection(cats) {
         'from business ' + formatCurrency(fromBusiness.allocated) +
         ' · sole trader ' + formatCurrency(fromSoleTrader.allocated)) +
     '</div>' +
+    potAction({ label: 'Reserve pot', settle: 'hold', keys: ['biz_reserve'] },
+      cats, 'pay-host-income') +
+    payHost('pay-host-income') +
   '</section>';
 }
 
@@ -353,60 +488,245 @@ function renderIncomeSection(cats) {
 
 function renderAllocationsSection(cats) {
   var draw = catOf(cats, 'owner_pay');
-  var withheld = mergeCats(cats, 'Tax withheld at source', 'auto_paid', WITHHELD_KEYS);
+  var withheld = sumCats(cats, WITHHELD_KEYS);
+  var personalTotal = sumCats(cats, keysOf(PERSONAL_ALLOCATIONS));
 
-  var personalKeys = [];
-  PERSONAL_ALLOCATIONS.forEach(function(row) { personalKeys = personalKeys.concat(row.keys); });
-  var personalTotal = sumCats(cats, personalKeys);
-
+  // No single total: the draw and the personal pot below it are the same money
+  // seen twice, so one figure over both would be meaningless.
   var html = '<section class="flow-group">' +
-    sectionTitle('Allocations', personalTotal.allocated);
+    '<h3 class="flow-group__title">Allocations <span class="muted small">' +
+    'the draw out of the company, then how the personal pot splits</span></h3>';
 
-  // Business: the draw out of the company. Rendered as a block, not a bare
-  // figure, because this is the only place a draw can be marked as transferred.
   html += subHeading('Business: owner pay draw', draw.allocated,
     formatCurrency(draw.outstanding) + ' still to draw');
-  html += '<div class="category-list">' +
-    (draw.items && draw.items.length
-      ? renderCategoryBlock({
-          category: 'Owner Pay draw', settle: 'transfer', isWithheld: false,
-          allocated: draw.allocated, paid: draw.paid,
-          outstanding: draw.outstanding, items: draw.items
-        })
-      : '<p class="muted">No owner pay draw in this range.</p>') +
-  '</div>';
+  html += potAction({ label: 'Owner pay draw', settle: 'transfer', keys: ['owner_pay'] },
+    cats, 'pay-host-allocations');
 
-  // Personal: one block per bucket, company and sole-trader merged.
   html += subHeading('Personal', personalTotal.allocated,
     formatCurrency(personalTotal.outstanding) + ' still to action');
-  html += '<div class="category-list">';
-  var anyPersonal = false;
-  PERSONAL_ALLOCATIONS.forEach(function(row) {
-    var merged = mergeCats(cats, row.label, row.settle, row.keys);
-    if (!merged.items.length) return;
-    anyPersonal = true;
-    html += renderCategoryBlock(merged);
-  });
-  if (!anyPersonal) html += '<p class="muted">No personal allocations in this range.</p>';
-  html += '</div>';
+  html += '<div class="flow-grid">' +
+    PERSONAL_ALLOCATIONS.map(function(row) {
+      var legacy = sumCats(cats, [row.keys[1]]);
+      var detail = legacy.allocated > 0
+        ? 'incl. ' + formatCurrency(legacy.allocated) + ' sole trader'
+        : 'still to ' + settleShortVerb(row.settle).toLowerCase();
+      return payableTile(row, cats, 'pay-host-allocations', detail);
+    }).join('') +
+  '</div>';
+  html += payHost('pay-host-allocations');
 
-  // Legacy withholding: money the payer kept, so there is nothing to action.
-  if (withheld.items.length) {
+  // Withholding: money the payer kept, so there is nothing to action.
+  if (withheld.allocated > 0) {
     html += subHeading('Legacy: tax withheld', withheld.allocated, 'deducted at source');
-    html += '<div class="category-list">' + renderCategoryBlock(withheld) + '</div>';
+    html += '<div class="flow-grid flow-grid--single">' +
+      '<div class="mini-tile mini-tile--withheld">' +
+        '<span class="mini-tile__label">Tax withheld at source</span>' +
+        '<span class="mini-tile__value">' + formatCurrency(withheld.allocated) + '</span>' +
+        '<span class="mini-tile__detail">never reached your account — nothing to do</span>' +
+      '</div>' +
+    '</div>';
   }
 
   return html + '</section>';
 }
 
+// --- The payment panel ---
+
 /**
- * One bucket as a box: totals, a progress bar, and its allocations listed per
- * invoice with the Mark Paid / Set Aside / Transferred mechanic.
+ * Open the payment panel for one bucket, under the section it belongs to.
+ *
+ * Only one panel is ever open: opening a second would leave two amounts on
+ * screen with no way to tell which button submits which.
+ */
+function openPayPanel(hostId, keys, label, settle, outstanding) {
+  closePayPanel();
+
+  var host = document.getElementById(hostId);
+  if (!host) return;
+
+  BudgetPay = { keys: keys, label: label, settle: settle, outstanding: Number(outstanding) || 0 };
+
+  var verb = settleShortVerb(settle);
+  var amount = BudgetPay.outstanding.toFixed(2);
+
+  host.innerHTML =
+    '<article class="pay-panel" id="pay-panel">' +
+      '<header class="pay-panel__header">' +
+        '<h4>' + escapeHtml(verb) + ': ' + escapeHtml(label) + '</h4>' +
+        '<span class="muted small">' + formatCurrency(BudgetPay.outstanding) + ' outstanding' +
+          (BudgetRange.from || BudgetRange.to
+            ? ' between ' + escapeHtml(BudgetRange.from) + ' and ' + escapeHtml(BudgetRange.to)
+            : '') +
+        '</span>' +
+      '</header>' +
+      '<div class="pay-panel__fields">' +
+        '<label>Amount' +
+          '<input type="number" id="pay-amount" step="0.01" min="0.01" value="' + amount + '">' +
+        '</label>' +
+        '<label>Date' +
+          '<input type="date" id="pay-date" value="' + todayStr() + '">' +
+        '</label>' +
+        '<label>Note (optional)' +
+          '<input type="text" id="pay-note" placeholder="e.g. ASB 4471, GST Q2">' +
+        '</label>' +
+      '</div>' +
+      '<div class="pay-panel__actions">' +
+        '<button type="button" class="btn-subtle btn-small" onclick="payFullRemaining()">' +
+          'Use full ' + formatCurrency(BudgetPay.outstanding) + '</button>' +
+        '<span class="pay-panel__spacer"></span>' +
+        '<button type="button" class="btn-small" onclick="closePayPanel()">Cancel</button>' +
+        '<button type="button" class="btn-small btn-primary" onclick="submitPayment()">Record ' +
+          escapeHtml(settleNoun(settle)) + '</button>' +
+      '</div>' +
+      '<p class="muted small pay-panel__note">Applied to the oldest unpaid invoices in this ' +
+        'bucket first. Anything less than the full amount leaves the rest outstanding.</p>' +
+    '</article>';
+
+  var input = document.getElementById('pay-amount');
+  if (input && input.focus) input.focus();
+}
+
+function closePayPanel() {
+  ['pay-host-obligations', 'pay-host-income', 'pay-host-allocations'].forEach(function(id) {
+    var host = document.getElementById(id);
+    if (host) host.innerHTML = '';
+  });
+  BudgetPay = { keys: '', label: '', settle: '', outstanding: 0 };
+}
+
+function payFullRemaining() {
+  var input = document.getElementById('pay-amount');
+  if (input) input.value = BudgetPay.outstanding.toFixed(2);
+}
+
+function submitPayment() {
+  var amountEl = document.getElementById('pay-amount');
+  if (!amountEl || !BudgetPay.keys) return;
+
+  // Strip anything that is not part of a number: a pasted "$1,234.50" is a
+  // perfectly reasonable thing to type into an amount box.
+  var amount = Number(String(amountEl.value).replace(/[^0-9.\-]/g, ''));
+  if (!(amount > 0)) {
+    showToast('Enter an amount greater than zero.', 'error');
+    return;
+  }
+  if (amount - BudgetPay.outstanding > 0.005) {
+    showToast('That is more than the ' + formatCurrency(BudgetPay.outstanding) + ' outstanding.', 'error');
+    return;
+  }
+
+  var dateEl = document.getElementById('pay-date');
+  var noteEl = document.getElementById('pay-note');
+  var noun = settleNoun(BudgetPay.settle);
+
+  // The note goes last: it is free text and may contain the '|' delimiter.
+  var params = [
+    BudgetPay.keys,
+    amount.toFixed(2),
+    (dateEl && dateEl.value) || todayStr(),
+    BudgetRange.from || '',
+    BudgetRange.to || '',
+    (noteEl && noteEl.value) || ''
+  ].join('|');
+
+  serverCall('payBudgetCategoriesFromClient', params).then(function(result) {
+    showToast(formatCurrency(result && result.amount) + ' ' + noun + ' recorded — ' + BudgetPay.label);
+    App.invalidate(['budget', 'dashboard']);
+    renderBudgetSummary();
+  }).catch(function(err) {
+    showToast(err.message, 'error');
+  });
+}
+
+function undoPayment(paymentId) {
+  if (!confirm('Undo this payment? The money goes back to outstanding.')) return;
+  serverCall('undoBudgetPaymentFromClient', paymentId).then(function() {
+    showToast('Payment undone');
+    App.invalidate(['budget', 'dashboard']);
+    renderBudgetSummary();
+  }).catch(function(err) {
+    showToast(err.message, 'error');
+  });
+}
+
+// --- History ---
+
+/**
+ * Everything the top of the page summarises, itemised — closed by default so
+ * the overview stays an overview.
+ */
+function renderHistorySection(summary, cats) {
+  var payments = (summary && summary.payments) || [];
+
+  return '<details class="flow-group history-group">' +
+    '<summary><h3 class="flow-group__title">History' +
+      ' <span class="muted small">' + payments.length + ' payment' +
+      (payments.length === 1 ? '' : 's') + ' · every allocation</span></h3></summary>' +
+    renderPaymentHistory(payments) +
+    renderAllocationHistory(cats) +
+  '</details>';
+}
+
+function renderPaymentHistory(payments) {
+  var html = subHeading('Payments', payments.reduce(function(sum, p) {
+    return sum + (Number(p.amount) || 0);
+  }, 0), 'recorded in this range');
+
+  if (!payments.length) {
+    return html + '<p class="muted">No payments recorded yet. Use the buttons above to record one.</p>';
+  }
+
+  html += '<div class="scroll-x"><table class="data-table data-table--compact">' +
+    '<thead><tr><th>Date</th><th>Category</th><th class="number">Amount</th>' +
+    '<th>Covers</th><th>Note</th><th></th></tr></thead><tbody>';
+
+  payments.forEach(function(p) {
+    html += '<tr>' +
+      '<td>' + (p.payment_date ? formatDate(p.payment_date) : '<span class="muted">—</span>') + '</td>' +
+      '<td>' + escapeHtml(p.category) +
+        ' <span class="pot-tag pot-tag--' + escapeHtml(p.scope) + '">' +
+        escapeHtml(allocationScopeLabel(p.scope)) + '</span></td>' +
+      '<td class="number">' + formatCurrency(p.amount) + '</td>' +
+      '<td class="muted">' + p.allocations + ' allocation' + (p.allocations === 1 ? '' : 's') + '</td>' +
+      '<td>' + (p.notes ? escapeHtml(p.notes) : '<span class="muted">—</span>') + '</td>' +
+      '<td class="actions"><button type="button" class="btn-small btn-subtle" onclick="undoPayment(\'' +
+        jsAttr(p.payment_id) + '\')">Undo</button></td>' +
+    '</tr>';
+  });
+
+  return html + '</tbody></table></div>';
+}
+
+function renderAllocationHistory(cats) {
+  var html = '<h4 class="sub-heading">Allocations ' +
+    '<span class="muted small">by bucket, per invoice</span></h4>';
+
+  var rows = BIZ_OBLIGATIONS
+    .concat(PERSONAL_OBLIGATIONS)
+    .concat([{ label: 'Reserve', settle: 'hold', keys: ['biz_reserve'] }])
+    .concat([{ label: 'Owner pay draw', settle: 'transfer', keys: ['owner_pay'] }])
+    .concat(PERSONAL_ALLOCATIONS)
+    .concat([{ label: 'Tax withheld at source', settle: 'auto_paid', keys: WITHHELD_KEYS }]);
+
+  html += '<div class="category-list">';
+  var any = false;
+  rows.forEach(function(row) {
+    var merged = mergeCats(cats, row.label, row.settle, row.keys);
+    if (!merged.items.length) return;
+    any = true;
+    html += renderCategoryBlock(merged);
+  });
+  if (!any) html += '<p class="muted">No allocations in this range.</p>';
+  return html + '</div>';
+}
+
+/**
+ * One bucket, itemised per invoice. Read-only: money is settled by the
+ * payment panel above, against the bucket, not one invoice at a time.
  */
 function renderCategoryBlock(cat) {
   var isWithheld = cat.isWithheld;
   var barPct = pctOf(cat.paid, cat.allocated);
-  var actionLabel = settleActionLabel(cat.settle);
   var movedWord = settleMode(cat.settle).settledWord;
 
   var html = '<article class="category-block">' +
@@ -424,33 +744,23 @@ function renderCategoryBlock(cat) {
     '<table class="data-table data-table--compact">' +
       '<thead><tr>' +
         '<th>Invoice</th><th>Source</th><th class="number">Amount</th>' +
-        '<th>Status</th><th>Moved on</th><th>Note</th><th></th>' +
+        '<th class="number">Settled</th><th>Status</th><th>Moved on</th>' +
       '</tr></thead><tbody>';
 
   cat.items.slice().sort(function(a, b) {
     return sortInvoiceIds(a.invoice_id, b.invoice_id);
   }).forEach(function(item) {
     var status = item.status || 'allocated';
+    // Older summaries carried no per-item paid figure; fall back to the status.
+    var paid = item.paid == null ? (status === 'paid' ? item.amount : 0) : item.paid;
     html += '<tr>' +
       '<td><code>' + escapeHtml(item.invoice_id) + '</code></td>' +
       '<td>' + escapeHtml(item.business_name) + '</td>' +
       '<td class="number">' + formatCurrency(item.amount) + '</td>' +
+      '<td class="number">' + formatCurrency(paid) + '</td>' +
       '<td><span class="badge badge-' + escapeHtml(status) + '">' + escapeHtml(status) + '</span></td>' +
       '<td>' + (item.transfer_date ? formatDate(item.transfer_date) : '<span class="muted">—</span>') + '</td>' +
-      '<td>' + (item.notes ? escapeHtml(item.notes) : '<span class="muted">—</span>') + '</td>' +
-      '<td class="actions">';
-
-    if (!isWithheld) {
-      if (status === 'allocated') {
-        html += '<button type="button" class="btn-small btn-primary" onclick="markAllocationPaid(\'' +
-          jsAttr(item.allocation_id) + '\')">' + escapeHtml(actionLabel) + '</button>';
-      } else if (status === 'paid') {
-        html += '<button type="button" class="btn-small btn-subtle" onclick="markAllocationUnpaid(\'' +
-          jsAttr(item.allocation_id) + '\')">Undo</button>';
-      }
-    }
-
-    html += '</td></tr>';
+    '</tr>';
   });
   html += '</tbody></table></article>';
   return html;
@@ -500,23 +810,6 @@ function sortInvoiceIds(a, b) {
   // Shorter suffix first: '' < 'a' < 'z' < 'aa'
   if (pa.suffix.length !== pb.suffix.length) return pa.suffix.length - pb.suffix.length;
   return pa.suffix.localeCompare(pb.suffix);
-}
-
-function markAllocationPaid(allocationId) {
-  var note = prompt('Where did this go? (optional)');
-  if (note === null) return;
-  var params = allocationId + '|paid|' + todayStr() + '|' + (note || '');
-  serverCall('updateAllocationStatusFromClient', params).then(function() {
-    showToast('Marked as actioned');
-    renderBudgetSummary();
-  }).catch(function(err) { showToast(err.message, 'error'); });
-}
-
-function markAllocationUnpaid(allocationId) {
-  serverCall('updateAllocationStatusFromClient', allocationId + '|allocated|').then(function() {
-    showToast('Reverted to allocated');
-    renderBudgetSummary();
-  }).catch(function(err) { showToast(err.message, 'error'); });
 }
 
 // --- Allocate Invoice ---

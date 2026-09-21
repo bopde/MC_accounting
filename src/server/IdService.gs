@@ -21,6 +21,7 @@ var ID_PREFIXES = {
   'TimeEntries': 'TE',
   'Expenses': 'EXP',
   'BudgetAllocations': 'BA',
+  'BudgetPayments': 'BP',
   'AccountSummaries': 'AS'
 };
 

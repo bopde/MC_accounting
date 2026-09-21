@@ -71,6 +71,8 @@ const db = {
   })
 };
 
+db.BudgetPayments = [];
+
 let seq = 100;
 Object.assign(srv, {
   LockService: { getScriptLock: function() { return { waitLock: function() {}, releaseLock: function() {} }; } },
@@ -83,9 +85,14 @@ Object.assign(srv, {
   },
   appendRow: function(n, d) {
     if (n === 'BudgetAllocations') d.allocation_id = 'BA-' + (++seq);
+    if (n === 'BudgetPayments') d.payment_id = 'BP-' + (++seq);
     d._rowIndex = db[n].length + 2;
     db[n].push(Object.assign({}, d));
     return d;
+  },
+  deleteRow: function(n, i) {
+    db[n] = db[n].filter(function(r) { return r._rowIndex !== i; });
+    db[n].forEach(function(r, k) { r._rowIndex = k + 2; });
   },
   updateRow: function(n, i, d) {
     const k = db[n].findIndex(function(r) { return r._rowIndex === i; });
@@ -123,6 +130,15 @@ Object.assign(srv, {
 });
 
 srv.allocateBudget('0526', 'BR-001');
+
+// A part payment, so the page is checked with money genuinely half-settled:
+// $1,000 against GST, which is allocated at $750 (company) — capped at what is
+// outstanding — and $200 against personal tax, which is allocated at far more.
+srv.payBudgetCategories('biz_gst,legacy_gst', 750, '2026-06-02', 'ASB 4471 | GST Q2',
+  { dateFrom: '2026-01-01', dateTo: '2026-12-31' });
+srv.payBudgetCategories('per_tax,legacy_tax', 200, '2026-06-03', '',
+  { dateFrom: '2026-01-01', dateTo: '2026-12-31' });
+
 const summary = srv.getBudgetSummary({ dateFrom: '2026-01-01', dateTo: '2026-12-31' });
 
 // --- Client: load the real render functions ---
@@ -146,11 +162,18 @@ cli.AppCache.budgetCategories = srv.getBudgetCategories();
 cli.AppCache.businesses = db.Businesses;
 
 const cats = cli.catByKey(summary);
+
+// The overview and the history are asserted separately: bucket labels appear
+// in both, so a count taken over the whole page would say nothing about where
+// they landed.
+const map = cli.renderMoneyMap(summary, cats);
 const html =
   cli.renderRevenueSection(summary, cats) +
   cli.renderObligationsSection(cats) +
   cli.renderIncomeSection(cats) +
   cli.renderAllocationsSection(cats);
+const history = cli.renderHistorySection(summary, cats);
+const page = map + html + history;
 
 // --- Harness ---
 
@@ -194,9 +217,14 @@ check('header present', html.indexOf('>Total obligations ') !== -1);
 check('two columns, Business and Personal',
   (html.match(/<h4>Business<\/h4>/g) || []).length === 1 &&
   (html.match(/<h4>Personal<\/h4>/g) || []).length === 1);
-check('Tax to pay appears on both sides', (html.match(/Tax to pay/g) || []).length === 2);
-check('GST to pay appears once', (html.match(/GST to pay/g) || []).length === 1);
-check('ACC to pay appears on both sides', (html.match(/ACC to pay/g) || []).length === 2);
+function boxCount(label) {
+  return (html.match(new RegExp('mini-tile__label">' + label + '<', 'g')) || []).length;
+}
+check('Tax to pay appears on both sides', boxCount('Tax to pay') === 2);
+check('GST to pay appears once', boxCount('GST to pay') === 1);
+check('ACC to pay appears on both sides', boxCount('ACC to pay') === 2);
+check('the header counts what is still owed, not what was allocated',
+  Math.abs(sectionTotal('Total obligations') - 2485.93) < 0.02);
 check('the sole-trader portion of personal tax is named', html.indexOf('sole trader') !== -1);
 check('boxes show Paid X of Y', html.indexOf('mini-tile__split') !== -1);
 
@@ -215,32 +243,94 @@ check('header present', html.indexOf('>Allocations ') !== -1);
 check('owner pay draw subheading', html.indexOf('Business: owner pay draw') !== -1);
 check('legacy withheld subheading', html.indexOf('Legacy: tax withheld') !== -1);
 ['Save', 'Donate', 'Invest', 'Spend'].forEach(function(label) {
-  check('block for ' + label, html.indexOf('<h4>' + label + '</h4>') !== -1);
+  check('box for ' + label, html.indexOf('mini-tile__label">' + label + '<') !== -1);
 });
-const order = ['Save', 'Donate', 'Invest', 'Spend'].map(function(l) { return html.indexOf('<h4>' + l + '</h4>'); });
+const order = ['Save', 'Donate', 'Invest', 'Spend']
+  .map(function(l) { return html.indexOf('mini-tile__label">' + l + '<'); });
 check('buckets in the requested order', order.every(function(v, i) { return i === 0 || v > order[i - 1]; }));
-check('Mark Set Aside on Save (a held bucket)', /Save<\/h4>[\s\S]*?Mark Set Aside/.test(html));
-check('Mark Transferred on the owner pay draw', /Owner Pay draw<\/h4>[\s\S]*?Mark Transferred/.test(html));
-check('Mark Paid on Donate (a paid-out bucket)', /Donate<\/h4>[\s\S]*?Mark Paid/.test(html));
-check('withheld rows offer no action',
+check('no per-invoice rows in the overview — that is what the history is for',
+  html.indexOf('<code>0526</code>') === -1 && html.indexOf('<code>0425</code>') === -1);
+check('withheld money offers no action',
   (html.split('Legacy: tax withheld')[1] || '').indexOf('<button') === -1);
+
+console.log('\nOverview actions');
+function verbFor(label) {
+  const m = new RegExp('mini-tile__label">' + label +
+    '<[\\s\\S]*?tile-action">(.*?)</div>').exec(html);
+  return m ? m[1] : '';
+}
+check('Set aside on Save (a held bucket)', verbFor('Save').indexOf('>Set aside<') !== -1);
+// The draw and the Reserve pot are action bars, not boxes: their figures are
+// already in the subheading and the pot tile above them.
+function potActionFor(label) {
+  const m = new RegExp('pot-action__label">' + label +
+    ' &mdash;[\\s\\S]*?</span>(.*?)</div>').exec(html);
+  return m ? m[1] : '';
+}
+check('Transfer on the owner pay draw', potActionFor('Owner pay draw').indexOf('>Transfer<') !== -1);
+check('Set aside on the Reserve pot', potActionFor('Reserve pot').indexOf('>Set aside<') !== -1);
+check('the Reserve figure is not repeated in a second box',
+  html.indexOf('mini-tile__label">Reserve') === -1);
+check('Pay on Donate (a paid-out bucket)', verbFor('Donate').indexOf('>Pay<') !== -1);
+check('Pay on GST', verbFor('GST to pay').indexOf('>') !== -1);
+check('a fully settled bucket offers no button, it says so',
+  verbFor('GST to pay').indexOf('paid in full') !== -1 &&
+  verbFor('GST to pay').indexOf('<button') === -1);
+check('every action opens the payment panel, not a per-invoice toggle',
+  (html.match(/onclick="openPayPanel\(/g) || []).length >= 8 &&
+  html.indexOf('markAllocationPaid') === -1);
+check('merged buckets pass every key they cover',
+  html.indexOf("'per_tax,legacy_tax'") !== -1);
+check('one payment host per actionable section',
+  (html.match(/class="pay-host"/g) || []).length === 3);
+
+console.log('\nMoney map');
+check('both accounts named', map.indexOf('Business account') !== -1 && map.indexOf('Personal account') !== -1);
+check('owner pay is the bridge between them', /money-map__bridge-label">Owner pay/.test(map));
+check('the bridge carries the draw amount', map.indexOf('$3,050.00') !== -1);
+check('business side shows invoiced, obligations and reserve',
+  ['Invoiced in', 'Obligations out', 'Reserve kept'].every(function(l) { return map.indexOf(l) !== -1; }));
+check('personal side shows what came in and what is left to allocate',
+  map.indexOf('>To allocate<') !== -1 && map.indexOf('owner pay + $1,000.00 sole trader') !== -1);
+check('the map agrees with the Revenue box (5750)', map.indexOf('$5,750.00') !== -1);
+check('no undefined or NaN in the money map', !/undefined|NaN/.test(map));
+
+console.log('\nHistory');
+check('collapsed by default', /<details class="flow-group history-group">/.test(history) &&
+  history.indexOf('<details class="flow-group history-group" open') === -1);
+check('payments table lists both payments',
+  (history.match(/onclick="undoPayment\(/g) || []).length === 2);
+check('a payment note containing a pipe survives', history.indexOf('ASB 4471 | GST Q2') !== -1);
+check('per-invoice rows live here', history.indexOf('<code>0526</code>') !== -1 &&
+  history.indexOf('<code>0425</code>') !== -1);
 check('company and sole-trader money share one Spend block',
-  /Spend<\/h4>[\s\S]*?<code>0425<\/code>/.test(html) && /Spend<\/h4>[\s\S]*?<code>0526<\/code>/.test(html));
-check('per-invoice rows listed', html.indexOf('<code>0526</code>') !== -1 && html.indexOf('<code>0425</code>') !== -1);
-check('progress bars restored', (html.match(/progress-bar__fill/g) || []).length >= 5);
+  /Spend<\/h4>[\s\S]*?<code>0425<\/code>/.test(history) && /Spend<\/h4>[\s\S]*?<code>0526<\/code>/.test(history));
+check('progress bars per bucket', (history.match(/progress-bar__fill/g) || []).length >= 5);
+check('a part-paid allocation is labelled as such', history.indexOf('badge-part-paid') !== -1);
+check('the settled column is shown per allocation', history.indexOf('>Settled</th>') !== -1);
+check('history is read-only apart from undo',
+  history.indexOf('markAllocationPaid') === -1 && history.indexOf('markAllocationUnpaid') === -1);
 
 console.log('\nWhole page');
 check('three two-column rows', (html.match(/class="pot-grid"/g) || []).length === 3);
-check('user text is HTML-escaped', html.indexOf('Bob&#39;s Consulting') !== -1);
-check('no undefined or NaN leaked into the markup', !/undefined|NaN/.test(html));
+check('user text is HTML-escaped', page.indexOf('Bob&#39;s Consulting') !== -1);
+check('no undefined or NaN leaked into the markup', !/undefined|NaN/.test(page));
 // Invoiced revenue - obligations = income + withheld, as displayed. Invoiced
 // revenue is the business box plus sole trader; the personal box is the
 // overlapping view and deliberately plays no part in this identity.
 const invoicedRevenue = tiles[0] + 1000;
 const withheldShown = 100;
+// Against ALLOCATED obligations: the header shows what is still owed, which
+// falls as payments are recorded, but the identity is about where the money
+// was assigned, not how much of it has left the account yet.
+const obligationsAllocated = cli.sumCats(cats,
+  cli.BIZ_OBLIGATIONS.concat(cli.PERSONAL_OBLIGATIONS)
+    .reduce(function(keys, row) { return keys.concat(row.keys); }, [])).allocated;
 check('the displayed sections reconcile',
-  Math.abs((invoicedRevenue - sectionTotal('Total obligations')) -
+  Math.abs((invoicedRevenue - obligationsAllocated) -
     (sectionTotal('Total income') + withheldShown)) < 0.02);
+check('payments reduce what is owed without moving what was allocated',
+  Math.abs(obligationsAllocated - sectionTotal('Total obligations') - 950) < 0.02);
 
 // --- Dashboard budget tile, over the same allocations ---
 
@@ -269,8 +359,9 @@ const dashAmounts = Array.from(dash.matchAll(/dash-budget-item__amount">([^<]+)/
   .map(function(m) { return money(m[1]); });
 check('business revenue matches the Budget page (5750), got ' + dashAmounts[0], dashAmounts[0] === 5750);
 check('personal revenue matches the Budget page (4050), got ' + dashAmounts[1], dashAmounts[1] === 4050);
-check('obligations split business/personal, outstanding only',
-  dashAmounts[2] === 2200 && dashAmounts[3] === 1235.93);
+check('obligations split business/personal, outstanding only — ' +
+  dashAmounts[2] + ' / ' + dashAmounts[3],
+  dashAmounts[2] === 1450 && dashAmounts[3] === 1035.93);
 check('four personal allocation boxes in spend/save/invest/donate order',
   /Spend[\s\S]*?Save[\s\S]*?Invest[\s\S]*?Donate/.test(dash.split('Personal allocations')[1]));
 check('allocation amounts match the Budget page buckets',

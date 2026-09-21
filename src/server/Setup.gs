@@ -72,9 +72,21 @@ function sheetSchemas() {
       'status', 'budget_rule_id', 'contract_id', 'po_number',
       'description', 'notes', 'line_descriptions'
     ],
+    // `paid_amount` is how much of `amount` has actually been paid, so a
+    // payment need not settle a whole allocation. `status` is kept in step
+    // ('paid' once paid_amount covers amount) for rows written before it
+    // existed, where a blank paid_amount means "status is the whole truth".
     'BudgetAllocations': [
       'allocation_id', 'invoice_id', 'category', 'category_key', 'scope',
-      'percentage', 'amount', 'status', 'transfer_date', 'notes'
+      'percentage', 'amount', 'status', 'paid_amount', 'transfer_date', 'notes'
+    ],
+    // One row per payment made against a budget category. `covered` records
+    // exactly which allocations the money was applied to and how much each
+    // got, in the form 'BA-002:252;BA-003:18', so a payment can be undone
+    // precisely rather than by re-deriving it.
+    'BudgetPayments': [
+      'payment_id', 'payment_date', 'category_key', 'category', 'scope',
+      'amount', 'notes', 'covered', 'created_date'
     ],
     'AccountSummaries': [
       'summary_id', 'account_id', 'month', 'ending_balance',
@@ -168,6 +180,7 @@ function setupSheets() {
   // Backfill identity columns on pre-company allocations, then make sure a
   // company rule exists so the Allocate tab is usable straight away.
   migrateBudgetAllocations();
+  migrateAllocationPaidAmounts();
   seedCompanyBudgetRule();
 
   Logger.log('Setup complete!');
@@ -247,6 +260,56 @@ function migrateBudgetAllocations() {
 
   Logger.log('migrateBudgetAllocations: stamped ' + stamped + ' row(s)');
   return stamped;
+}
+
+/**
+ * Backfill `paid_amount` on allocations written before partial payments
+ * existed: a row marked 'paid' was paid in full, a row marked 'allocated' was
+ * not paid at all.
+ *
+ * Idempotent, and deliberately narrow — only blank cells are filled, so a
+ * partial payment recorded since is never overwritten. Amounts, labels and
+ * statuses are not touched.
+ */
+function migrateAllocationPaidAmounts() {
+  var ss = getSpreadsheet();
+  var sheet = ss.getSheetByName('BudgetAllocations');
+  if (!sheet) return 0;
+
+  var lastRow = sheet.getLastRow();
+  var lastCol = sheet.getLastColumn();
+  if (lastRow < 2 || lastCol < 1) return 0;
+
+  var headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+  var amountCol = headers.indexOf('amount');
+  var statusCol = headers.indexOf('status');
+  var paidCol = headers.indexOf('paid_amount');
+  if (amountCol === -1 || statusCol === -1 || paidCol === -1) {
+    Logger.log('migrateAllocationPaidAmounts: columns missing, run setupSheets first');
+    return 0;
+  }
+
+  var values = sheet.getRange(2, 1, lastRow - 1, lastCol).getValues();
+  var out = [];
+  var filled = 0;
+
+  values.forEach(function(row) {
+    var existing = row[paidCol];
+    if (existing !== '' && existing !== null && existing !== undefined) {
+      out.push([existing]);
+      return;
+    }
+    var paid = normaliseAllocationStatus(row[statusCol]) === 'paid'
+      ? (Number(row[amountCol]) || 0)
+      : 0;
+    out.push([paid]);
+    filled++;
+  });
+
+  if (filled > 0) sheet.getRange(2, paidCol + 1, out.length, 1).setValues(out);
+
+  Logger.log('migrateAllocationPaidAmounts: filled ' + filled + ' row(s)');
+  return filled;
 }
 
 /**
