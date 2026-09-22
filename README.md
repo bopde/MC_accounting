@@ -59,13 +59,14 @@ Budgeting is split into two scopes — **business** (company money that stays in
    1. a. **Personal Tax** — % of Owner Pay.
    1. b. **Personal ACC** — % of Owner Pay (earner levy).
    1. c. **Donate / Save / Invest / Spend** — split what remains, must sum to 100%. The rounding residual lands on Spend so the four lines sum exactly.
-1. **Withholding** (optional, defaults to 0%) — Tax Withheld and ACC Withheld come off gross before anything else, for the rare contract that still withholds. Auto-marked paid, because the cash never arrived.
+1. **Withholding** (optional, defaults to 0%) — Tax Withheld and ACC Withheld come off gross before anything else, for the rare contract that still withholds. Created already paid, because the payer sent that money to the IRD rather than to you. On the Money Flow page it is counted inside the tax or ACC obligation it settled, not as a category of its own.
 
 Every category definition, percentage field and the cascade itself live in one registry (`src/server/BudgetCategories.gs`). The front end reads that registry rather than keeping its own copy, and the allocation preview is computed by the same server function that writes the allocations.
 
-- Only paid invoices can be allocated. Each allocation is tracked as `allocated` -> `paid`; the button wording follows how the money actually moves (Mark Paid / Mark Set Aside / Mark Transferred).
-- Summary dashboard splits Business and Personal, shows how much is still to action in each, and drills down per invoice.
-- **Pre-company (sole trader) rules and allocations still work.** Historical allocations are tagged `legacy` and render in their own section; a rule's `model` column (`company` or `sole_trader`) decides which cascade applies.
+- Only paid invoices can be allocated. An allocation carries both what was assigned and how much of it has been paid, so a payment can settle part of one.
+- Money is paid **per bucket**, not per invoice — in full or for any part of what is outstanding — and the full history of payments and allocations sits below the totals.
+- An allocation can be **removed** again from the invoice view, which is what lets an allocated invoice be corrected or voided.
+- **Pre-company (sole trader) rules and allocations still work.** Historical allocations are tagged `legacy` and are folded into the section they belong to rather than kept in a silo; a rule's `model` column (`company` or `sole_trader`) decides which cascade applies.
 
 The percentages are yours to set — the seeded defaults reflect current NZ rates but are placeholders, not tax advice. Note that tax is provisioned on revenue, not profit: as a company, deductible expenses genuinely reduce your taxable income, so the Business Tax bucket will over-provision.
 
@@ -377,14 +378,14 @@ An overview first and a ledger second. Everything above the history is totals wi
    1. a. **Business revenue** — everything the company invoiced, including GST.
    1. b. **Personal revenue** — what actually reached you: the owner pay draw plus sole-trader income, before personal tax, ACC and allocations.
    1. c. They overlap by the owner pay draw — business revenue the company then paid to you — so there is no combined total, and the section says so rather than leaving you to work out why the boxes do not sum.
-1. **Total obligations** — what is still owed, split into **Business** (tax, GST, ACC) and **Personal** (tax, ACC). Each box shows what is left to pay as the headline, with a progress bar, `Paid $X of $Y`, and the button that settles it.
+1. **Total obligations** — what is still owed, split into **Business** (tax, GST, ACC) and **Personal** (tax, ACC). Each box shows what is left to pay as the headline, with a progress bar, `Paid $X of $Y`, and the button that settles it. Tax and ACC **withheld at source** are counted here, inside the obligation they settled — see below.
 1. **Total income** — what survives the obligations: the **Reserve pot** the business keeps, and the **Personal pot**, with the from-business and sole-trader portions named in small text.
-1. **Allocations** — the **owner pay draw** out of the company, then the personal pot split across **Save / Donate / Invest / Spend**, and finally **legacy tax withheld** (which has no action, because that money never arrived).
+1. **Allocations** — the **owner pay draw** out of the company, then the personal pot split across **Save / Donate / Invest / Spend**.
 1. **History** — collapsed by default. Every payment made, newest first, each with **Undo**; then every allocation itemised per invoice, read-only.
 
 #### Recording a payment
 
-Money leaves an account in single payments, not invoice by invoice, so that is how it is recorded. Every box's button says **Pay**, whatever the bucket is — paying GST, setting money aside in Reserve and drawing owner pay are one act (money leaving the account it is sitting in), and three different words made the page read as three mechanisms. The settle mode still decides whether a bucket has a button at all: withheld money never arrived, so it has none. The button opens a panel prefilled with the full outstanding amount:
+Money leaves an account in single payments, not invoice by invoice, so that is how it is recorded. Every box's button says **Pay**, whatever the bucket is — paying GST, setting money aside in Reserve and drawing owner pay are one act (money leaving the account it is sitting in), and three different words made the page read as three mechanisms. The settle mode still decides whether a bucket has a button at all. The button opens a panel prefilled with the full outstanding amount:
 
 1. **Pay it all**: leave the amount as it is (or click **Use full $X**) and record it.
 1. **Pay part of it**: type any smaller amount. The rest stays outstanding.
@@ -398,12 +399,24 @@ Two things bound a payment:
 
 A box that merges buckets settles all of them at once: **Personal / Tax to pay** covers `per_tax` and `legacy_tax`, and one payment clears across both.
 
-Sole-trader money is folded into the section it belongs to rather than kept in a separate silo — legacy tax and ACC join Personal obligations, and legacy Save/Donate/Invest/Spend join their company counterparts in the same box. Only tax withheld at source stays separately labelled, because that money never arrived.
+Sole-trader money is folded into the section it belongs to rather than kept in a separate silo — legacy tax and ACC join Personal obligations, and legacy Save/Donate/Invest/Spend join their company counterparts in the same box.
+
+#### Tax withheld at source
+
+Tax and ACC the payer deducted belong to the **obligation they settled**, not to a category of their own. A payer who withheld tax on a sole-trader invoice paid that tax to the IRD out of the same obligation — it simply never passed through your account. So `legacy_tax_withheld` is counted inside Personal **Tax to pay** (and `biz_tax_withheld` inside Business Tax to pay, and the two ACC equivalents likewise).
+
+What that changes:
+
+1. a. It raises **Paid** and the **total**, and leaves **still to pay** exactly where it was. The box says `$X already withheld at source` so the higher Paid figure is explained.
+1. b. A payment is never applied to it — there is nothing left to pay — so the withheld keys are stripped from what the Pay button sends.
+1. c. It no longer has a box of its own in Allocations or in the History; its allocations are listed inside the obligation, where the invoice and date are visible.
+
+Keeping it apart understated every tax figure by the amount already paid, and put a box on the page for money that needs nothing done with it.
 
 The sections reconcile on **invoiced** revenue — business plus sole trader. The personal view overlaps that and plays no part in the identity. `tools/check-budget-render.js` asserts both:
 
 ```
-invoiced revenue − Total obligations = Reserve + Personal pot + withheld
+invoiced revenue − Total obligations = Reserve + Personal pot
 Personal pot                        = Save + Donate + Invest + Spend
 ```
 

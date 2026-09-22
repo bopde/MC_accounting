@@ -105,18 +105,32 @@ function allocationScopeLabel(scope) {
  * `keys` are registry category keys; where a company bucket has a sole-trader
  * counterpart both are listed so they merge into one figure, and `legacyKeys`
  * names the sole-trader part so the UI can call it out.
+ *
+ * Tax and ACC WITHHELD AT SOURCE belong to the obligation they settled.
+ * A payer who withheld tax on a sole-trader invoice paid that tax to the IRD
+ * on your behalf — it came out of the same obligation, it just never passed
+ * through your account. Leaving it in a box of its own understated every tax
+ * figure by the amount already paid, and made the page ask what to do with
+ * money that needs nothing done. `withheldKeys` marks that portion so it can
+ * be named, and kept out of what a payment is applied to.
  */
 var BIZ_OBLIGATIONS = [
-  { label: 'Tax to pay', keys: ['biz_tax'] },
+  { label: 'Tax to pay', keys: ['biz_tax', 'biz_tax_withheld'],
+    withheldKeys: ['biz_tax_withheld'] },
   // GST registration began with the company, so there is no sole-trader GST —
   // but fold legacy_gst in rather than silently dropping a row that does exist.
   { label: 'GST to pay', keys: ['biz_gst', 'legacy_gst'], legacyKeys: ['legacy_gst'] },
-  { label: 'ACC to pay', keys: ['biz_acc'] }
+  { label: 'ACC to pay', keys: ['biz_acc', 'biz_acc_withheld'],
+    withheldKeys: ['biz_acc_withheld'] }
 ];
 
 var PERSONAL_OBLIGATIONS = [
-  { label: 'Tax to pay', keys: ['per_tax', 'legacy_tax'], legacyKeys: ['legacy_tax'] },
-  { label: 'ACC to pay', keys: ['per_acc', 'legacy_acc'], legacyKeys: ['legacy_acc'] }
+  { label: 'Tax to pay', keys: ['per_tax', 'legacy_tax', 'legacy_tax_withheld'],
+    legacyKeys: ['legacy_tax', 'legacy_tax_withheld'],
+    withheldKeys: ['legacy_tax_withheld'] },
+  { label: 'ACC to pay', keys: ['per_acc', 'legacy_acc', 'legacy_acc_withheld'],
+    legacyKeys: ['legacy_acc', 'legacy_acc_withheld'],
+    withheldKeys: ['legacy_acc_withheld'] }
 ];
 
 // Displayed in this order, each merging its company and sole-trader bucket.
@@ -127,7 +141,18 @@ var PERSONAL_ALLOCATIONS = [
   { label: 'Spend', settle: 'transfer', keys: ['per_spend', 'legacy_spend'] }
 ];
 
+/**
+ * Buckets created already settled, because the payer deducted them.
+ *
+ * They are counted inside their obligation above. This list is what keeps them
+ * out of a payment: there is nothing left to pay against money that has
+ * already gone to the IRD.
+ */
 var WITHHELD_KEYS = ['legacy_tax_withheld', 'legacy_acc_withheld', 'biz_tax_withheld', 'biz_acc_withheld'];
+
+function isWithheldKey(key) {
+  return WITHHELD_KEYS.indexOf(key) !== -1;
+}
 
 /**
  * Sheets hands booleans back as true, 'TRUE' or 'true' depending on how the
