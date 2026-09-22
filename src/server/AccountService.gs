@@ -30,7 +30,9 @@ function normaliseMonth(val) {
  * If a summary already exists for the account+month, updates it.
  */
 function saveAccountSummary(data) {
-  return withScriptLock(function() {
+  var lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
     var month = normaliseMonth(data.month);
 
     var existing = getAll('AccountSummaries').find(function(s) {
@@ -54,20 +56,18 @@ function saveAccountSummary(data) {
     var monthCol = getColumnIndex(sheet, 'month');
 
     if (existing) {
-      // updateRow rebuilds the WHOLE row from this object, so it must be merged
-      // onto the existing one. Passing `payload` alone blanked summary_id on
-      // every re-save, which then let generateId hand the same ID out twice.
-      var merged = existing;
-      Object.keys(payload).forEach(function(k) { merged[k] = payload[k]; });
-      updateRow('AccountSummaries', existing._rowIndex, merged);
+      payload._rowIndex = existing._rowIndex;
+      updateRow('AccountSummaries', existing._rowIndex, payload);
       sheet.getRange(existing._rowIndex, monthCol).setNumberFormat('@').setValue(month);
-      return merged;
+      return payload;
     } else {
       var result = appendRow('AccountSummaries', payload);
       sheet.getRange(result._rowIndex, monthCol).setNumberFormat('@').setValue(month);
       return result;
     }
-  });
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 /**

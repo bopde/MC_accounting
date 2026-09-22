@@ -2,49 +2,30 @@
 /**
  * Budget Allocations module.
  *
- * The Money Flow tab is an overview first and a ledger second:
- *   0. Money map         — the journey in one band: what the company invoiced,
- *                          what it owes and keeps, what it draws across to you,
- *                          and what happens on the personal side
- *   1. Revenue           — two overlapping views: what the company invoiced,
- *                          and what reached you (owner pay + sole trader)
- *   2. Total obligations — tax, GST and ACC owed, split business vs personal
- *   3. Total income      — what is left: the business Reserve and personal pots
- *   4. Allocations       — the owner pay draw and how the personal pot splits
- *   5. History           — collapsed: every payment made, and every allocation
- *                          itemised per invoice
+ * Simplified two-state model:
+ *   allocated -> paid
  *
- * Sections 2-4 are totals with one action each. Money leaves an account in
- * single payments, not invoice by invoice, so a payment is recorded against a
- * BUCKET — in full or for any part of what is outstanding — and the server
- * applies it to that bucket's oldest unpaid invoices. Nothing above the
- * history asks the user to settle allocations one row at a time.
+ * Withheld categories (Tax Withheld, ACC Withheld) are always 'paid'
+ * because the payer already withheld them at source.
  *
- * The sections reconcile on invoiced revenue (business + sole trader; the
- * personal view overlaps it and plays no part in the identity):
- *   invoiced revenue - Total obligations = Reserve + Personal pot
- *   Personal pot = Save + Donate + Invest + Spend
- *
- * Sole-trader (legacy) money is folded into the section it belongs to rather
- * than sitting in its own silo: legacy tax and ACC join Personal obligations,
- * and legacy Save/Donate/Invest/Spend join their company counterparts.
- *
- * Tax and ACC WITHHELD AT SOURCE are part of the obligation they settled, not
- * a category of their own. A payer who withheld tax paid it to the IRD out of
- * the same obligation; it simply never passed through your account. Keeping it
- * apart understated every tax figure by the amount already paid, and put a box
- * on the page for money that needs nothing done with it. It is now inside its
- * obligation, where it raises Paid without touching what is still to pay — and
- * the identity above loses its `+ withheld` term as a result.
- *
- * Category definitions, ordering and settle wording come from the server
- * registry (BudgetCategories.gs) via AppCache.budgetCategories. This file does
- * no allocation maths — the preview is computed by the same server code that
- * writes the allocations.
+ * Flow:
+ *   1. Invoice marked paid (in Invoices page)
+ *   2. User allocates it here using a budget rule  -> allocations land as 'allocated'
+ *   3. User clicks "Mark Paid" on each allocation  -> allocation becomes 'paid'
  */
 
-// The bucket groupings both the Budget page and the Dashboard render from live
-// in utils.js.html, which is included first — see BIZ_OBLIGATIONS there.
+var BUDGET_CATEGORIES_UI = [
+  'Tax Withheld', 'Tax To Pay', 'ACC Withheld', 'ACC To Pay',
+  'GST Collected',
+  'Donate', 'Save', 'Invest', 'Spend'
+];
+
+var BUDGET_PCT_FIELDS = [
+  'tax_withheld_pct', 'tax_to_pay_pct',
+  'acc_withheld_pct', 'acc_to_pay_pct',
+  null,
+  'donate_pct', 'save_pct', 'invest_pct', 'spend_pct'
+];
 
 function renderBudgetPage(container) {
   container.innerHTML =
@@ -70,17 +51,7 @@ function showBudgetTab(tab) {
   }
 }
 
-// --- Money Flow ---
-
-/**
- * The date range the figures on screen were built from. Payments are applied
- * to the same range, so "pay the remaining" settles exactly what is shown and
- * never reaches into a period the user is not looking at.
- */
-var BudgetRange = { from: '', to: '' };
-
-/** The bucket the open payment panel is for. */
-var BudgetPay = { keys: '', label: '', settle: '', outstanding: 0 };
+// --- Budget Summary ---
 
 function renderBudgetSummary() {
   var content = document.getElementById('budget-tab-content');
@@ -96,9 +67,6 @@ function renderBudgetSummary() {
     AppState.dateTo = range.to;
   }
 
-  BudgetRange = { from: AppState.dateFrom, to: AppState.dateTo };
-  BudgetPay = { keys: '', label: '', settle: '', outstanding: 0 };
-
   content.innerHTML =
     '<div class="filters">' +
       buildDateFilters('budget-filter-from', 'budget-filter-to', AppState.dateFrom, AppState.dateTo) +
@@ -109,10 +77,11 @@ function renderBudgetSummary() {
 
   serverCall('getBudgetSummary', { dateFrom: AppState.dateFrom, dateTo: AppState.dateTo }).then(function(summary) {
     var body = document.getElementById('budget-summary-body');
-    if (!body) return;
+    var categories = (summary && summary.categories) || [];
+    var totals = (summary && summary.totals) || {};
 
-    var scopes = (summary && summary.scopes) || [];
-    if (!scopes.length) {
+    var hasData = categories.some(function(c) { return c.items && c.items.length > 0; });
+    if (!hasData) {
       body.innerHTML =
         '<article class="empty-state">' +
           '<h3>No allocations in this date range</h3>' +
@@ -121,222 +90,78 @@ function renderBudgetSummary() {
       return;
     }
 
-    var cats = catByKey(summary);
-    body.innerHTML =
-      renderMoneyMap(summary, cats) +
-      renderRevenueSection(summary, cats) +
-      renderObligationsSection(cats) +
-      renderIncomeSection(cats) +
-      renderAllocationsSection(cats) +
-      renderHistorySection(summary, cats);
+    var html = '';
+
+    // --- Overview tiles ---
+    html += '<section class="flow-group">' +
+      '<h3 class="flow-group__title">Overview</h3>' +
+      '<div class="flow-overview">' +
+        '<div class="flow-tile flow-tile--total">' +
+          '<span class="flow-tile__label">Total allocated</span>' +
+          '<span class="flow-tile__value">' + formatCurrency(totals.allocated) + '</span>' +
+          '<span class="flow-tile__detail">across ' + categories.reduce(function(s, c){ return s + c.items.length; }, 0) + ' allocations</span>' +
+        '</div>' +
+        '<div class="flow-tile flow-tile--paid">' +
+          '<span class="flow-tile__label">Moved / paid</span>' +
+          '<span class="flow-tile__value">' + formatCurrency(totals.paid) + '</span>' +
+          '<span class="flow-tile__detail">' + pctOf(totals.paid, totals.allocated) + ' of total</span>' +
+        '</div>' +
+        '<div class="flow-tile flow-tile--outstanding">' +
+          '<span class="flow-tile__label">Still to move</span>' +
+          '<span class="flow-tile__value">' + formatCurrency(totals.outstanding) + '</span>' +
+          '<span class="flow-tile__detail">' + pctOf(totals.outstanding, totals.allocated) + ' of total</span>' +
+        '</div>' +
+      '</div>' +
+    '</section>';
+
+    // --- Tax, ACC & GST at a glance ---
+    html += '<section class="flow-group">' +
+      '<h3 class="flow-group__title">Tax, ACC &amp; GST</h3>' +
+      '<div class="flow-grid">' +
+        tileWithheldPaid('Tax withheld (at source)', totals.taxWithheld) +
+        tileSplit('Tax to pay', totals.taxToPayAllocated, totals.taxToPayPaid, totals.taxToPayOutstanding) +
+        tileWithheldPaid('ACC withheld (at source)', totals.accWithheld) +
+        tileSplit('ACC to pay', totals.accToPayAllocated, totals.accToPayPaid, totals.accToPayOutstanding) +
+        tileSplit('GST collected', totals.gstAllocated, totals.gstPaid, totals.gstOutstanding) +
+      '</div>' +
+    '</section>';
+
+    // --- Net distribution at a glance ---
+    html += '<section class="flow-group">' +
+      '<h3 class="flow-group__title">Net</h3>' +
+      '<div class="flow-grid">' +
+        tileSplit('Spend', totals.spendAllocated, totals.spendPaid, totals.spendOutstanding) +
+        tileSplit('Save', totals.saveAllocated, totals.savePaid, totals.saveOutstanding) +
+        tileSplit('Donate', totals.donateAllocated, totals.donatePaid, totals.donateOutstanding) +
+        tileSplit('Invest', totals.investAllocated, totals.investPaid, totals.investOutstanding) +
+      '</div>' +
+    '</section>';
+
+    // --- Per-category detail ---
+    var categoryOrder = [
+      'Tax Withheld', 'Tax To Pay', 'ACC Withheld', 'ACC To Pay',
+      'GST Collected', 'Spend', 'Save', 'Donate', 'Invest'
+    ];
+    var catMap = {};
+    categories.forEach(function(cat) { catMap[cat.category] = cat; });
+
+    html += '<section class="flow-group">' +
+      '<h3 class="flow-group__title">By category</h3>' +
+      '<div class="category-list">';
+
+    categoryOrder.forEach(function(name) {
+      var cat = catMap[name];
+      if (!cat || !cat.items || cat.items.length === 0) return;
+      html += renderCategoryBlock(cat);
+    });
+
+    html += '</div></section>';
+
+    body.innerHTML = html;
   }).catch(function(err) {
     var body = document.getElementById('budget-summary-body');
     if (body) body.innerHTML = '<p class="error">Error: ' + escapeHtml(err.message) + '</p>';
   });
-}
-
-// --- Composition helpers ---
-
-var ZERO_CAT = { allocated: 0, paid: 0, outstanding: 0 };
-
-/**
- * Flatten scopes[].categories[] into a key -> category map.
- * getBudgetSummary omits buckets with no allocations, so every lookup goes
- * through catOf() to get a zeroed stub instead of undefined.
- */
-function catByKey(summary) {
-  var map = {};
-  ((summary && summary.scopes) || []).forEach(function(group) {
-    (group.categories || []).forEach(function(cat) { map[cat.key] = cat; });
-  });
-  return map;
-}
-
-function catOf(cats, key) {
-  return cats[key] || ZERO_CAT;
-}
-
-/** Total / paid / outstanding across several buckets. */
-function sumCats(cats, keys) {
-  var out = { allocated: 0, paid: 0, outstanding: 0, count: 0 };
-  keys.forEach(function(key) {
-    var cat = catOf(cats, key);
-    out.allocated += cat.allocated;
-    out.paid += cat.paid;
-    out.outstanding += cat.outstanding;
-    out.count += (cat.items || []).length;
-  });
-  return out;
-}
-
-/**
- * Combine several buckets into one pseudo-category so a company bucket and its
- * sole-trader counterpart render as a single box with one item list.
- */
-function mergeCats(cats, label, settle, keys) {
-  var merged = {
-    category: label,
-    settle: settle,
-    isWithheld: settle === 'auto_paid',
-    allocated: 0,
-    paid: 0,
-    outstanding: 0,
-    items: []
-  };
-  keys.forEach(function(key) {
-    var cat = catOf(cats, key);
-    merged.allocated += cat.allocated;
-    merged.paid += cat.paid;
-    merged.outstanding += cat.outstanding;
-    merged.items = merged.items.concat(cat.items || []);
-  });
-  return merged;
-}
-
-/**
- * Revenue, from each side's point of view. These two OVERLAP by the owner pay
- * draw — the company invoiced it and then paid it to you — so they are shown as
- * two views and never summed into a combined total.
- *
- *   business — everything the company invoiced (billed hours + GST)
- *   personal — what reached you: the owner pay draw plus sole-trader income,
- *              before any personal allocations come off it
- */
-function revenueViews(summary, cats) {
-  var business = { total: 0, count: 0 };
-  var soleTrader = { total: 0, count: 0 };
-
-  ((summary && summary.scopes) || []).forEach(function(group) {
-    var bucket = group.scope === 'legacy' ? soleTrader : business;
-    (group.categories || []).forEach(function(cat) {
-      // The owner pay transfer is not revenue on the business side; it is the
-      // same money moving out, and it is counted on the personal side below.
-      if (cat.isTransfer) return;
-      bucket.total += cat.allocated;
-      bucket.count += (cat.items || []).length;
-    });
-  });
-
-  var draw = catOf(cats, 'owner_pay');
-
-  return {
-    business: business,
-    soleTrader: soleTrader,
-    draw: draw,
-    personal: {
-      total: draw.allocated + soleTrader.total,
-      count: (draw.items || []).length + soleTrader.count
-    }
-  };
-}
-
-/** Every category key that sits behind a named group of boxes. */
-function keysOf(rows) {
-  var keys = [];
-  rows.forEach(function(row) { keys = keys.concat(row.keys); });
-  return keys;
-}
-
-// --- Box markup (the pre-existing tile styles) ---
-
-function sectionTitle(label, amount, note) {
-  return '<h3 class="flow-group__title">' + escapeHtml(label) +
-    ' <span class="section-total">' + formatCurrency(amount || 0) + '</span>' +
-    (note ? ' <span class="muted small">' + escapeHtml(note) + '</span>' : '') +
-    '</h3>';
-}
-
-function bigTile(label, amount, detail) {
-  return '<div class="flow-tile flow-tile--total">' +
-    '<span class="flow-tile__label">' + escapeHtml(label) + '</span>' +
-    '<span class="flow-tile__value">' + formatCurrency(amount || 0) + '</span>' +
-    '<span class="flow-tile__detail">' + escapeHtml(detail || '') + '</span>' +
-  '</div>';
-}
-
-/** Outstanding as the headline, with a progress bar and "Paid X of Y". */
-function owedTile(label, figures, detail) {
-  return '<div class="mini-tile mini-tile--split">' +
-    '<span class="mini-tile__label">' + escapeHtml(label) + '</span>' +
-    '<span class="mini-tile__value">' + formatCurrency(figures.outstanding || 0) + '</span>' +
-    '<span class="mini-tile__detail">' + escapeHtml(detail || 'still to pay') + '</span>' +
-    '<div class="mini-tile__bar">' +
-      '<div class="mini-tile__bar-paid" style="width:' + pctOf(figures.paid, figures.allocated) + '"></div>' +
-    '</div>' +
-    '<div class="mini-tile__split">' +
-      '<span>Paid ' + formatCurrency(figures.paid || 0) + '</span>' +
-      '<span>of ' + formatCurrency(figures.allocated || 0) + '</span>' +
-    '</div>' +
-  '</div>';
-}
-
-/**
- * An owedTile with the action that settles it.
- *
- * The button opens one payment panel for the whole bucket rather than a row
- * per invoice: money leaves the account in single payments, so that is how it
- * is recorded here. `keys` is every registry key behind the box, which is more
- * than one wherever a company bucket merges with its sole-trader counterpart.
- */
-function payableTile(row, cats, hostId, detail) {
-  var figures = sumCats(cats, row.keys);
-  var settle = row.settle || 'pay';
-  var verb = settleShortVerb(settle);
-  var keys = payableKeys(row.keys).join(',');
-
-  var settled = figures.allocated > 0 && figures.outstanding <= 0.004;
-  var action = settled
-    ? '<span class="tile-action__done">paid in full</span>'
-    : '<button type="button" class="btn-small btn-primary" onclick="openPayPanel(\'' +
-        jsAttr(hostId) + '\',\'' + jsAttr(keys) + '\',\'' + jsAttr(row.label) + '\',\'' +
-        jsAttr(settle) + '\',' + (figures.outstanding || 0) + ')">' + escapeHtml(verb) + '</button>';
-
-  return '<div class="tile-with-action">' +
-    owedTile(row.label, figures, detail) +
-    '<div class="tile-action">' + action + '</div>' +
-  '</div>';
-}
-
-/**
- * The keys a payment may actually be applied to.
- *
- * Money withheld at source counts towards the figures — it was paid, by the
- * payer rather than by you — but there is nothing left to pay against it, so
- * it never forms part of what a payment targets.
- */
-function payableKeys(keys) {
-  return keys.filter(function(key) { return !isWithheldKey(key); });
-}
-
-/**
- * The action for a bucket whose figures are already on screen in a big tile.
- * A second full box would repeat the same number twice in a row, so this is
- * the button and nothing else.
- */
-function potAction(row, cats, hostId) {
-  var figures = sumCats(cats, row.keys);
-  var settle = row.settle || 'pay';
-  var verb = settleShortVerb(settle);
-  var settled = figures.allocated > 0 && figures.outstanding <= 0.004;
-
-  var action = settled
-    ? '<span class="tile-action__done">paid in full</span>'
-    : '<button type="button" class="btn-small btn-primary" onclick="openPayPanel(\'' +
-        jsAttr(hostId) + '\',\'' + jsAttr(payableKeys(row.keys).join(',')) + '\',\'' + jsAttr(row.label) + '\',\'' +
-        jsAttr(settle) + '\',' + (figures.outstanding || 0) + ')">' + escapeHtml(verb) + '</button>';
-
-  return '<div class="pot-action">' +
-    '<span class="pot-action__label">' + escapeHtml(row.label) + ' &mdash; ' +
-      formatCurrency(figures.outstanding) + ' still to pay, ' +
-      formatCurrency(figures.paid) + ' of ' + formatCurrency(figures.allocated) + ' paid' +
-    '</span>' +
-    action +
-  '</div>';
-}
-
-/** Where a payment panel opens. One per section, filled on demand. */
-function payHost(id) {
-  return '<div class="pay-host" id="' + escapeHtml(id) + '"></div>';
 }
 
 function pctOf(part, total) {
@@ -344,407 +169,38 @@ function pctOf(part, total) {
   return ((Number(part) / Number(total)) * 100).toFixed(0) + '%';
 }
 
-/** A half-width column with its own subheader and subtotal. */
-function subCard(label, amount, amountNote, inner) {
-  return '<article class="pot-card">' +
-    '<header class="pot-card__header">' +
-      '<h4>' + escapeHtml(label) + '</h4>' +
-      '<div class="pot-card__headline">' +
-        '<span class="pot-card__amount">' + formatCurrency(amount || 0) + '</span>' +
-        '<span class="muted small">' + escapeHtml(amountNote) + '</span>' +
-      '</div>' +
-    '</header>' +
-    inner +
-  '</article>';
-}
-
-function subHeading(label, amount, note) {
-  return '<h4 class="sub-heading">' + escapeHtml(label) +
-    ' <span class="section-total section-total--sm">' + formatCurrency(amount || 0) + '</span>' +
-    (note ? ' <span class="muted small">' + escapeHtml(note) + '</span>' : '') +
-    '</h4>';
-}
-
-// --- The money map: how business money becomes personal money ---
-
-/**
- * One band at the top of the page tracing the whole journey: what the company
- * invoiced, what it owes and keeps, what it draws across to you, and what
- * happens on the personal side.
- *
- * Every figure here appears again in the sections below — this is the shape of
- * the thing, not a separate set of numbers.
- */
-function renderMoneyMap(summary, cats) {
-  var view = revenueViews(summary, cats);
-  var draw = catOf(cats, 'owner_pay');
-  var reserve = catOf(cats, 'biz_reserve');
-
-  var bizOwed = sumCats(cats, keysOf(BIZ_OBLIGATIONS));
-  var perOwed = sumCats(cats, keysOf(PERSONAL_OBLIGATIONS));
-  var personalPot = sumCats(cats, keysOf(PERSONAL_ALLOCATIONS));
-
-  function line(label, amount, note) {
-    return '<div class="money-map__line">' +
-      '<span class="money-map__line-label">' + escapeHtml(label) + '</span>' +
-      '<span class="money-map__line-amount">' + formatCurrency(amount || 0) + '</span>' +
-      (note ? '<span class="money-map__line-note">' + escapeHtml(note) + '</span>' : '') +
-    '</div>';
-  }
-
-  return '<section class="money-map">' +
-    '<article class="money-map__col money-map__col--business">' +
-      '<h4>Business account</h4>' +
-      line('Invoiced in', view.business.total, 'billed hours + GST') +
-      line('Obligations out', bizOwed.allocated, formatCurrency(bizOwed.outstanding) + ' still to pay') +
-      line('Reserve kept', reserve.allocated, formatCurrency(reserve.outstanding) + ' still to pay') +
-    '</article>' +
-    '<div class="money-map__bridge">' +
-      '<span class="money-map__bridge-label">Owner pay</span>' +
-      '<span class="money-map__bridge-amount">' + formatCurrency(draw.allocated) + '</span>' +
-      '<span class="money-map__bridge-arrow" aria-hidden="true">&rarr;</span>' +
-      '<span class="money-map__bridge-note">' + formatCurrency(draw.outstanding) + ' still to pay</span>' +
-    '</div>' +
-    '<article class="money-map__col money-map__col--personal">' +
-      '<h4>Personal account</h4>' +
-      line('In', view.personal.total,
-        'owner pay + ' + formatCurrency(view.soleTrader.total) + ' sole trader') +
-      line('Obligations out', perOwed.allocated, formatCurrency(perOwed.outstanding) + ' still to pay') +
-      line('To allocate', personalPot.allocated, formatCurrency(personalPot.outstanding) + ' still to pay') +
-    '</article>' +
-  '</section>';
-}
-
-// --- Header 1: Revenue ---
-
-function renderRevenueSection(summary, cats) {
-  var view = revenueViews(summary, cats);
-
-  // No combined total: the two boxes overlap by the owner pay draw, so adding
-  // them would count that money twice. The note says so rather than leaving the
-  // reader to work out why the figures do not sum to anything.
-  return '<section class="flow-group">' +
-    '<h3 class="flow-group__title">Revenue' +
-      ' <span class="muted small">two views of the same money</span></h3>' +
-    '<div class="pot-grid">' +
-      bigTile('Business revenue', view.business.total,
-        view.business.count + ' allocation' + (view.business.count === 1 ? '' : 's') + ' · incl. GST') +
-      bigTile('Personal revenue', view.personal.total,
-        'owner pay ' + formatCurrency(view.draw.allocated) +
-        ' · sole trader ' + formatCurrency(view.soleTrader.total)) +
-    '</div>' +
-    '<p class="muted small" style="margin:-0.75rem 0 0;">' +
-      'Counts <strong>allocated</strong> invoices only — a paid invoice you have not ' +
-      'allocated yet is not in these figures. ' +
-      'The two overlap and are not added together: the ' + formatCurrency(view.draw.allocated) +
-      ' owner pay draw is business revenue the company then paid to you. ' +
-      'Personal revenue is before personal tax, ACC and allocations.' +
-    '</p>' +
-  '</section>';
-}
-
-// --- Header 2: Total obligations ---
-
-function renderObligationsSection(cats) {
-  function column(label, rows) {
-    var subtotal = sumCats(cats, keysOf(rows));
-
-    var tiles = '<div class="flow-grid flow-grid--stack">' +
-      rows.map(function(row) {
-        // Name the sole-trader portion when there is one, so a merged figure
-        // never looks like it all came from the company — and the withheld
-        // portion, which is why Paid can be more than you have ever paid.
-        var notes = [];
-        var legacy = row.legacyKeys ? sumCats(cats, row.legacyKeys) : null;
-        if (legacy && legacy.allocated > 0) {
-          notes.push('incl. ' + formatCurrency(legacy.allocated) + ' sole trader');
-        }
-        var withheld = row.withheldKeys ? sumCats(cats, row.withheldKeys) : null;
-        if (withheld && withheld.allocated > 0) {
-          notes.push(formatCurrency(withheld.allocated) + ' already withheld at source');
-        }
-        return payableTile(row, cats, 'pay-host-obligations',
-          notes.length ? notes.join(' · ') : 'still to pay');
-      }).join('') +
-    '</div>';
-
-    return subCard(label, subtotal.outstanding, 'still to pay', tiles);
-  }
-
-  var total = sumCats(cats, keysOf(BIZ_OBLIGATIONS.concat(PERSONAL_OBLIGATIONS)));
-
-  return '<section class="flow-group">' +
-    sectionTitle('Total obligations', total.outstanding, 'still to pay') +
-    '<div class="pot-grid">' +
-      column('Business', BIZ_OBLIGATIONS) +
-      column('Personal', PERSONAL_OBLIGATIONS) +
-    '</div>' +
-    payHost('pay-host-obligations') +
-  '</section>';
-}
-
-// --- Header 3: Total income ---
-
-function renderIncomeSection(cats) {
-  var reserve = catOf(cats, 'biz_reserve');
-
-  var companyKeys = PERSONAL_ALLOCATIONS.map(function(row) { return row.keys[0]; });
-  var legacyKeys = PERSONAL_ALLOCATIONS.map(function(row) { return row.keys[1]; });
-  var fromBusiness = sumCats(cats, companyKeys);
-  var fromSoleTrader = sumCats(cats, legacyKeys);
-  var personalPot = fromBusiness.allocated + fromSoleTrader.allocated;
-
-  return '<section class="flow-group">' +
-    sectionTitle('Total income', reserve.allocated + personalPot, 'after obligations') +
-    '<div class="pot-grid">' +
-      bigTile('Business: Reserve pot', reserve.allocated,
-        formatCurrency(reserve.paid) + ' paid · ' + formatCurrency(reserve.outstanding) + ' still to pay') +
-      bigTile('Personal: Personal pot', personalPot,
-        'from business ' + formatCurrency(fromBusiness.allocated) +
-        ' · sole trader ' + formatCurrency(fromSoleTrader.allocated)) +
-    '</div>' +
-    potAction({ label: 'Reserve pot', settle: 'hold', keys: ['biz_reserve'] },
-      cats, 'pay-host-income') +
-    payHost('pay-host-income') +
-  '</section>';
-}
-
-// --- Header 4: Allocations ---
-
-function renderAllocationsSection(cats) {
-  var draw = catOf(cats, 'owner_pay');
-  var personalTotal = sumCats(cats, keysOf(PERSONAL_ALLOCATIONS));
-
-  // No single total: the draw and the personal pot below it are the same money
-  // seen twice, so one figure over both would be meaningless.
-  var html = '<section class="flow-group">' +
-    '<h3 class="flow-group__title">Allocations <span class="muted small">' +
-    'the draw out of the company, then how the personal pot splits</span></h3>';
-
-  html += subHeading('Business: owner pay draw', draw.allocated,
-    formatCurrency(draw.outstanding) + ' still to pay');
-  html += potAction({ label: 'Owner pay draw', settle: 'transfer', keys: ['owner_pay'] },
-    cats, 'pay-host-allocations');
-
-  html += subHeading('Personal', personalTotal.allocated,
-    formatCurrency(personalTotal.outstanding) + ' still to pay');
-  html += '<div class="flow-grid">' +
-    PERSONAL_ALLOCATIONS.map(function(row) {
-      var legacy = sumCats(cats, [row.keys[1]]);
-      var detail = legacy.allocated > 0
-        ? 'incl. ' + formatCurrency(legacy.allocated) + ' sole trader'
-        : 'still to pay';
-      return payableTile(row, cats, 'pay-host-allocations', detail);
-    }).join('') +
+function tileWithheldPaid(label, amount) {
+  return '<div class="mini-tile mini-tile--withheld">' +
+    '<span class="mini-tile__label">' + escapeHtml(label) + '</span>' +
+    '<span class="mini-tile__value">' + formatCurrency(amount || 0) + '</span>' +
+    '<span class="mini-tile__detail">auto-paid</span>' +
   '</div>';
-  html += payHost('pay-host-allocations');
-
-  return html + '</section>';
 }
 
-// --- The payment panel ---
-
-/**
- * Open the payment panel for one bucket, under the section it belongs to.
- *
- * Only one panel is ever open: opening a second would leave two amounts on
- * screen with no way to tell which button submits which.
- */
-function openPayPanel(hostId, keys, label, settle, outstanding) {
-  closePayPanel();
-
-  var host = document.getElementById(hostId);
-  if (!host) return;
-
-  BudgetPay = { keys: keys, label: label, settle: settle, outstanding: Number(outstanding) || 0 };
-
-  var verb = settleShortVerb(settle);
-  var amount = BudgetPay.outstanding.toFixed(2);
-
-  host.innerHTML =
-    '<article class="pay-panel" id="pay-panel">' +
-      '<header class="pay-panel__header">' +
-        '<h4>' + escapeHtml(verb) + ': ' + escapeHtml(label) + '</h4>' +
-        '<span class="muted small">' + formatCurrency(BudgetPay.outstanding) + ' outstanding' +
-          (BudgetRange.from || BudgetRange.to
-            ? ' between ' + escapeHtml(BudgetRange.from) + ' and ' + escapeHtml(BudgetRange.to)
-            : '') +
-        '</span>' +
-      '</header>' +
-      '<div class="pay-panel__fields">' +
-        '<label>Amount' +
-          '<input type="number" id="pay-amount" step="0.01" min="0.01" value="' + amount + '">' +
-        '</label>' +
-        '<label>Date' +
-          '<input type="date" id="pay-date" value="' + todayStr() + '">' +
-        '</label>' +
-        '<label>Note (optional)' +
-          '<input type="text" id="pay-note" placeholder="e.g. ASB 4471, GST Q2">' +
-        '</label>' +
-      '</div>' +
-      '<div class="pay-panel__actions">' +
-        '<button type="button" class="btn-subtle btn-small" onclick="payFullRemaining()">' +
-          'Use full ' + formatCurrency(BudgetPay.outstanding) + '</button>' +
-        '<span class="pay-panel__spacer"></span>' +
-        '<button type="button" class="btn-small" onclick="closePayPanel()">Cancel</button>' +
-        '<button type="button" class="btn-small btn-primary" onclick="submitPayment()">Record ' +
-          escapeHtml(settleNoun(settle)) + '</button>' +
-      '</div>' +
-      '<p class="muted small pay-panel__note">Applied to the oldest unpaid invoices in this ' +
-        'bucket first. Anything less than the full amount leaves the rest outstanding.</p>' +
-    '</article>';
-
-  var input = document.getElementById('pay-amount');
-  if (input && input.focus) input.focus();
+function tileSplit(label, allocated, paid, outstanding) {
+  return '<div class="mini-tile mini-tile--split">' +
+    '<span class="mini-tile__label">' + escapeHtml(label) + '</span>' +
+    '<span class="mini-tile__value">' + formatCurrency(outstanding || 0) + '</span>' +
+    '<span class="mini-tile__detail">outstanding</span>' +
+    '<div class="mini-tile__bar">' +
+      '<div class="mini-tile__bar-paid" style="width:' + pctOf(paid, allocated) + '"></div>' +
+    '</div>' +
+    '<div class="mini-tile__split">' +
+      '<span>Paid ' + formatCurrency(paid || 0) + '</span>' +
+      '<span>of ' + formatCurrency(allocated || 0) + '</span>' +
+    '</div>' +
+  '</div>';
 }
 
-function closePayPanel() {
-  ['pay-host-obligations', 'pay-host-income', 'pay-host-allocations'].forEach(function(id) {
-    var host = document.getElementById(id);
-    if (host) host.innerHTML = '';
-  });
-  BudgetPay = { keys: '', label: '', settle: '', outstanding: 0 };
-}
-
-function payFullRemaining() {
-  var input = document.getElementById('pay-amount');
-  if (input) input.value = BudgetPay.outstanding.toFixed(2);
-}
-
-function submitPayment() {
-  var amountEl = document.getElementById('pay-amount');
-  if (!amountEl || !BudgetPay.keys) return;
-
-  // Strip anything that is not part of a number: a pasted "$1,234.50" is a
-  // perfectly reasonable thing to type into an amount box.
-  var amount = Number(String(amountEl.value).replace(/[^0-9.\-]/g, ''));
-  if (!(amount > 0)) {
-    showToast('Enter an amount greater than zero.', 'error');
-    return;
-  }
-  if (amount - BudgetPay.outstanding > 0.005) {
-    showToast('That is more than the ' + formatCurrency(BudgetPay.outstanding) + ' outstanding.', 'error');
-    return;
-  }
-
-  var dateEl = document.getElementById('pay-date');
-  var noteEl = document.getElementById('pay-note');
-  var noun = settleNoun(BudgetPay.settle);
-
-  // The note goes last: it is free text and may contain the '|' delimiter.
-  var params = [
-    BudgetPay.keys,
-    amount.toFixed(2),
-    (dateEl && dateEl.value) || todayStr(),
-    BudgetRange.from || '',
-    BudgetRange.to || '',
-    (noteEl && noteEl.value) || ''
-  ].join('|');
-
-  serverCall('payBudgetCategoriesFromClient', params).then(function(result) {
-    showToast(formatCurrency(result && result.amount) + ' ' + noun + ' recorded — ' + BudgetPay.label);
-    App.invalidate(['budget', 'dashboard']);
-    renderBudgetSummary();
-  }).catch(function(err) {
-    showToast(err.message, 'error');
-  });
-}
-
-function undoPayment(paymentId) {
-  if (!confirm('Undo this payment? The money goes back to outstanding.')) return;
-  serverCall('undoBudgetPaymentFromClient', paymentId).then(function() {
-    showToast('Payment undone');
-    App.invalidate(['budget', 'dashboard']);
-    renderBudgetSummary();
-  }).catch(function(err) {
-    showToast(err.message, 'error');
-  });
-}
-
-// --- History ---
-
-/**
- * Everything the top of the page summarises, itemised — closed by default so
- * the overview stays an overview.
- */
-function renderHistorySection(summary, cats) {
-  var payments = (summary && summary.payments) || [];
-
-  return '<details class="flow-group history-group">' +
-    '<summary><h3 class="flow-group__title">History' +
-      ' <span class="muted small">' + payments.length + ' payment' +
-      (payments.length === 1 ? '' : 's') + ' · every allocation</span></h3></summary>' +
-    renderPaymentHistory(payments) +
-    renderAllocationHistory(cats) +
-  '</details>';
-}
-
-function renderPaymentHistory(payments) {
-  var html = subHeading('Payments', payments.reduce(function(sum, p) {
-    return sum + (Number(p.amount) || 0);
-  }, 0), 'recorded in this range');
-
-  if (!payments.length) {
-    return html + '<p class="muted">No payments recorded yet. Use the buttons above to record one.</p>';
-  }
-
-  html += '<div class="scroll-x"><table class="data-table data-table--compact">' +
-    '<thead><tr><th>Date</th><th>Category</th><th class="number">Amount</th>' +
-    '<th>Covers</th><th>Note</th><th></th></tr></thead><tbody>';
-
-  payments.forEach(function(p) {
-    html += '<tr>' +
-      '<td>' + (p.payment_date ? formatDate(p.payment_date) : '<span class="muted">—</span>') + '</td>' +
-      '<td>' + escapeHtml(p.category) +
-        ' <span class="pot-tag pot-tag--' + escapeHtml(p.scope) + '">' +
-        escapeHtml(allocationScopeLabel(p.scope)) + '</span></td>' +
-      '<td class="number">' + formatCurrency(p.amount) + '</td>' +
-      '<td class="muted">' + p.allocations + ' allocation' + (p.allocations === 1 ? '' : 's') + '</td>' +
-      '<td>' + (p.notes ? escapeHtml(p.notes) : '<span class="muted">—</span>') + '</td>' +
-      '<td class="actions"><button type="button" class="btn-small btn-subtle" onclick="undoPayment(\'' +
-        jsAttr(p.payment_id) + '\')">Undo</button></td>' +
-    '</tr>';
-  });
-
-  return html + '</tbody></table></div>';
-}
-
-function renderAllocationHistory(cats) {
-  var html = '<h4 class="sub-heading">Allocations ' +
-    '<span class="muted small">by bucket, per invoice</span></h4>';
-
-  var rows = BIZ_OBLIGATIONS
-    .concat(PERSONAL_OBLIGATIONS)
-    .concat([{ label: 'Reserve', settle: 'hold', keys: ['biz_reserve'] }])
-    .concat([{ label: 'Owner pay draw', settle: 'transfer', keys: ['owner_pay'] }])
-    .concat(PERSONAL_ALLOCATIONS);
-
-  html += '<div class="category-list">';
-  var any = false;
-  rows.forEach(function(row) {
-    var merged = mergeCats(cats, row.label, row.settle, row.keys);
-    if (!merged.items.length) return;
-    any = true;
-    html += renderCategoryBlock(merged);
-  });
-  if (!any) html += '<p class="muted">No allocations in this range.</p>';
-  return html + '</div>';
-}
-
-/**
- * One bucket, itemised per invoice. Read-only: money is settled by the
- * payment panel above, against the bucket, not one invoice at a time.
- */
 function renderCategoryBlock(cat) {
   var isWithheld = cat.isWithheld;
   var barPct = pctOf(cat.paid, cat.allocated);
-  var movedWord = isWithheld ? 'withheld' : 'paid';
 
   var html = '<article class="category-block">' +
     '<header class="category-block__header">' +
       '<div>' +
-        '<h4>' + escapeHtml(cat.category) + (isWithheld ? ' <span class="tag tag--auto">at source</span>' : '') + '</h4>' +
-        '<p class="muted">' + formatCurrency(cat.paid) + ' ' + escapeHtml(movedWord) +
+        '<h4>' + escapeHtml(cat.category) + (isWithheld ? ' <span class="tag tag--auto">auto-paid</span>' : '') + '</h4>' +
+        '<p class="muted">' + formatCurrency(cat.paid) + ' moved' +
           (!isWithheld ? ' · <strong>' + formatCurrency(cat.outstanding) + ' outstanding</strong>' : '') +
           ' · ' + formatCurrency(cat.allocated) + ' total' +
         '</p>' +
@@ -755,72 +211,60 @@ function renderCategoryBlock(cat) {
     '<table class="data-table data-table--compact">' +
       '<thead><tr>' +
         '<th>Invoice</th><th>Source</th><th class="number">Amount</th>' +
-        '<th class="number">Settled</th><th>Status</th><th>Moved on</th>' +
+        '<th>Status</th><th>Moved on</th><th>Note</th><th></th>' +
       '</tr></thead><tbody>';
 
-  cat.items.slice().sort(function(a, b) {
-    return sortInvoiceIds(a.invoice_id, b.invoice_id);
-  }).forEach(function(item) {
+  cat.items.sort(function(a, b) {
+    var sa = String(a.invoice_id), sb = String(b.invoice_id);
+    var ma = sa.match(/^(\d+)(.*)$/), mb = sb.match(/^(\d+)(.*)$/);
+    if (ma && mb) {
+      var na = parseInt(ma[1], 10), nb = parseInt(mb[1], 10);
+      if (na !== nb) return na - nb;
+      return ma[2].localeCompare(mb[2]);
+    }
+    return sa.localeCompare(sb);
+  });
+
+  cat.items.forEach(function(item) {
     var status = item.status || 'allocated';
-    // Older summaries carried no per-item paid figure; fall back to the status.
-    var paid = item.paid == null ? (status === 'paid' ? item.amount : 0) : item.paid;
     html += '<tr>' +
       '<td><code>' + escapeHtml(item.invoice_id) + '</code></td>' +
       '<td>' + escapeHtml(item.business_name) + '</td>' +
       '<td class="number">' + formatCurrency(item.amount) + '</td>' +
-      '<td class="number">' + formatCurrency(paid) + '</td>' +
-      '<td><span class="badge badge-' + escapeHtml(status) + '">' + escapeHtml(status) + '</span></td>' +
+      '<td><span class="badge badge-' + status + '">' + status + '</span></td>' +
       '<td>' + (item.transfer_date ? formatDate(item.transfer_date) : '<span class="muted">—</span>') + '</td>' +
-    '</tr>';
+      '<td>' + (item.notes ? escapeHtml(item.notes) : '<span class="muted">—</span>') + '</td>' +
+      '<td class="actions">';
+
+    if (!isWithheld) {
+      if (status === 'allocated') {
+        html += '<button type="button" class="btn-small btn-primary" onclick="markAllocationPaid(\'' + item.allocation_id + '\')">Mark Paid</button>';
+      } else if (status === 'paid') {
+        html += '<button type="button" class="btn-small btn-subtle" onclick="markAllocationUnpaid(\'' + item.allocation_id + '\')">Undo</button>';
+      }
+    }
+
+    html += '</td></tr>';
   });
   html += '</tbody></table></article>';
   return html;
 }
 
-/**
- * Sort invoice ids chronologically: <prefix?><MMYY><suffix?>, e.g. AT0526b.
- *
- * MMYY cannot be compared as a number — 0526 (May 2026) is numerically less
- * than 0625 (June 2025) but chronologically later — so year comes first, then
- * month, then the business prefix, then the suffix. Ids that do not match the
- * shape fall back to a plain string compare.
- */
-function parseInvoiceId(value) {
-  // Suffix matched case-insensitively: generateInvoiceId scans with /i, so the
-  // server happily continues a sequence from 'AT0526A' and the client must not
-  // then treat that same id as unparsable.
-  var m = /^([A-Za-z0-9]*?)(\d{3,4})([a-zA-Z]*)$/.exec(String(value == null ? '' : value).trim());
-  if (!m) return null;
-  // Three digits means Sheets coerced a bare '0526' to the number 526.
-  var digits = m[2].length === 3 ? '0' + m[2] : m[2];
-  return {
-    prefix: m[1].toUpperCase(),
-    month: digits.slice(0, 2),
-    year: digits.slice(2),
-    suffix: m[3].toLowerCase()
-  };
+function markAllocationPaid(allocationId) {
+  var note = prompt('Where did this go? (optional)');
+  if (note === null) return;
+  var params = allocationId + '|paid|' + todayStr() + '|' + (note || '');
+  serverCall('updateAllocationStatusFromClient', params).then(function() {
+    showToast('Marked as paid');
+    renderBudgetSummary();
+  }).catch(function(err) { showToast(err.message, 'error'); });
 }
 
-function sortInvoiceIds(a, b) {
-  var sa = String(a), sb = String(b);
-  var pa = parseInvoiceId(sa), pb = parseInvoiceId(sb);
-
-  // Anything unparsable (a hand-edited id) sorts last as its own block. Falling
-  // back to a string compare only when ONE side failed made the comparator
-  // intransitive — mixing a chronological order with a lexical one can produce
-  // a < b < c < a, and Array.sort then depends on input order.
-  if (!pa || !pb) {
-    if (pa) return -1;
-    if (pb) return 1;
-    return sa.localeCompare(sb);
-  }
-
-  if (pa.year !== pb.year) return pa.year < pb.year ? -1 : 1;
-  if (pa.month !== pb.month) return pa.month < pb.month ? -1 : 1;
-  if (pa.prefix !== pb.prefix) return pa.prefix < pb.prefix ? -1 : 1;
-  // Shorter suffix first: '' < 'a' < 'z' < 'aa'
-  if (pa.suffix.length !== pb.suffix.length) return pa.suffix.length - pb.suffix.length;
-  return pa.suffix.localeCompare(pb.suffix);
+function markAllocationUnpaid(allocationId) {
+  serverCall('updateAllocationStatusFromClient', allocationId + '|allocated|').then(function() {
+    showToast('Reverted to allocated');
+    renderBudgetSummary();
+  }).catch(function(err) { showToast(err.message, 'error'); });
 }
 
 // --- Allocate Invoice ---
@@ -829,38 +273,27 @@ function renderBudgetAllocate() {
   var content = document.getElementById('budget-tab-content');
   content.innerHTML = '<div aria-busy="true">Loading invoices...</div>';
 
-  // Its own date range: AppState.dateFrom/dateTo is a global that every other
-  // page overwrites, so visiting Hours first used to shrink this to two days
-  // and report "nothing to allocate" — with no date control here to see why.
-  var range = datePreset('ytd');
-
   Promise.all([
-    serverCall('getInvoicesWithDetails', { dateFrom: range.from, dateTo: range.to }),
-    serverCall('getAllClient', 'BudgetAllocations'),
-    serverCall('getBudgetRules')
+    serverCall('getInvoicesWithDetails', { dateFrom: AppState.dateFrom, dateTo: AppState.dateTo }),
+    serverCall('getAllClient', 'BudgetAllocations')
   ]).then(function(results) {
     var invoices = results[0] || [];
     var existingAllocs = results[1] || [];
-    var rules = (results[2] || []).filter(function(r) {
-      return isFlagTrue(r.active) || r.active === '' || r.active === undefined || r.active === null;
-    });
+    var rules = AppCache.budgetRules || [];
 
-    // normalizeId on both sides: Sheets stores invoice_id '0526' on the
-    // allocation row as the number 526, so a raw key never matched and an
-    // allocated invoice stayed in this list forever.
     var allocatedInvoiceIds = {};
-    existingAllocs.forEach(function(a) { allocatedInvoiceIds[normalizeId(a.invoice_id)] = true; });
+    existingAllocs.forEach(function(a) { allocatedInvoiceIds[a.invoice_id] = true; });
 
+    // Only paid invoices, not yet allocated
     var eligible = invoices.filter(function(inv) {
-      return inv.status === 'paid' && !allocatedInvoiceIds[normalizeId(inv.invoice_id)];
+      return inv.status === 'paid' && !allocatedInvoiceIds[inv.invoice_id];
     });
 
     if (eligible.length === 0) {
       content.innerHTML =
         '<article class="empty-state">' +
           '<h3>Nothing to allocate</h3>' +
-          '<p class="muted">Every paid invoice created between ' + escapeHtml(range.from) + ' and ' +
-            escapeHtml(range.to) + ' is already allocated. Mark a new invoice as paid in the Invoices tab to allocate it here.</p>' +
+          '<p class="muted">Every paid invoice is already allocated. Mark a new invoice as paid in the Invoices tab to allocate it here.</p>' +
         '</article>';
       return;
     }
@@ -869,12 +302,14 @@ function renderBudgetAllocate() {
       content.innerHTML =
         '<article class="empty-state">' +
           '<h3>No budget rules yet</h3>' +
-          '<p class="muted">Add a budget rule under Settings &rarr; Budget Rules before allocating.</p>' +
+          '<p class="muted">Add a budget rule under Settings → Budget Rules before allocating.</p>' +
         '</article>';
       return;
     }
 
-    var defaultRule = rules.find(function(r) { return isFlagTrue(r.is_default); }) || rules[0];
+    var defaultRule = rules.find(function(r) {
+      return r.is_default === true || r.is_default === 'TRUE' || r.is_default === 'true';
+    }) || rules[0];
 
     var invoiceOptions = eligible.map(function(inv) {
       return {
@@ -883,65 +318,22 @@ function renderBudgetAllocate() {
       };
     });
 
-    // Flag pre-company rules so an old cascade is never applied by accident.
-    var ruleOptions = rules.map(function(r) {
-      return {
-        id: r.rule_id,
-        label: r.name + (ruleModelOf(r) === 'company' ? '' : ' (sole trader)')
-      };
-    });
-
-    content.innerHTML =
+    var html =
       '<form id="allocate-form" class="form-card">' +
         '<div class="form-row">' +
           '<label>Invoice ' + buildSelect('ba-invoice', invoiceOptions, 'id', 'label', { required: true }) + '</label>' +
-          '<label>Budget rule ' + buildSelect('ba-rule', ruleOptions, 'id', 'label', { required: true, selected: defaultRule.rule_id, placeholder: false }) + '</label>' +
+          '<label>Budget rule ' + buildSelect('ba-rule', rules, 'rule_id', 'name', { required: true, selected: defaultRule.rule_id, placeholder: false }) + '</label>' +
         '</div>' +
         '<div class="form-actions">' +
           '<button type="button" onclick="previewAllocation()">Preview allocation</button>' +
         '</div>' +
       '</form>' +
       '<div id="allocation-preview"></div>';
+
+    content.innerHTML = html;
   }).catch(function(err) {
     content.innerHTML = '<p class="error">Error: ' + escapeHtml(err.message) + '</p>';
   });
-}
-
-/**
- * Cascade rows for the preview, built from the stage figures the server
- * returned. Company and sole-trader rules report different stages.
- */
-function cascadeRows(model, s, currency) {
-  var rows = [];
-  var add = function(label, value, opts) {
-    opts = opts || {};
-    if (opts.onlyIfNonZero && !value) return;
-    rows.push({ label: label, value: value, negative: !!opts.negative, strong: !!opts.strong });
-  };
-
-  add('Gross (billed hours)', s.gross);
-  add('Less withheld at source', s.withheld, { negative: true, onlyIfNonZero: true });
-
-  if (model === 'company') {
-    add('Business income', s.businessIncome, { strong: true });
-    add('Less business allocations (tax, ACC, reserve)', s.businessObligations, { negative: true, onlyIfNonZero: true });
-    add('Owner Pay — drawn to personal', s.ownerPay, { strong: true });
-    add('Less personal tax & ACC', s.personalObligations, { negative: true, onlyIfNonZero: true });
-    add('Personal net to distribute', s.personalNet, { strong: true });
-  } else {
-    add('Adjusted', s.adjusted, { strong: true });
-    add('Less obligations (tax/ACC to pay)', s.obligations, { negative: true, onlyIfNonZero: true });
-    add('Net to distribute', s.net, { strong: true });
-  }
-
-  add('Plus GST collected (held for IRD)', s.gst, { onlyIfNonZero: true });
-
-  return rows.map(function(r) {
-    return '<div' + (r.strong ? ' class="preview-numbers__key"' : '') + '>' +
-      '<span class="muted">' + escapeHtml(r.label) + '</span>' +
-      '<strong>' + (r.negative ? '&minus;' : '') + formatCurrency(r.value, currency) + '</strong>' +
-    '</div>';
-  }).join('');
 }
 
 function previewAllocation() {
@@ -953,78 +345,104 @@ function previewAllocation() {
     return;
   }
 
+  var rule = (AppCache.budgetRules || []).find(function(r) { return r.rule_id === ruleId; });
+  if (!rule) { showToast('Rule not found', 'error'); return; }
+
   var preview = document.getElementById('allocation-preview');
   preview.innerHTML = '<div aria-busy="true">Calculating...</div>';
 
-  // The server computes this with the same code that writes the allocations,
-  // so a preview can never disagree with the result.
-  serverCall('previewAllocationFromClient', invoiceId + '|' + ruleId).then(function(data) {
-    var currency = data.currency || 'NZD';
-    var lines = data.lines || [];
-    var isCompany = data.model === 'company';
-    var stages = data.stages || {};
+  serverCall('getInvoiceDetails', invoiceId).then(function(data) {
+    var inv = data.invoice;
+    var gross = (inv.time_subtotal != null && inv.time_subtotal !== '')
+      ? Number(inv.time_subtotal) : (Number(inv.subtotal) || 0);
+    var gstAmount = (inv.include_gst === true || inv.include_gst === 'true' || inv.include_gst === 'TRUE')
+      ? (Number(inv.gst_amount) || 0) : 0;
+    var currency = (data.business && data.business.currency) || 'NZD';
 
-    var explainer = isCompany
-      ? 'Allocated from billed hours only — expenses are pass-throughs. ' +
-        'Business tax, ACC and reserve come off business income; what is left is Owner Pay, ' +
-        'drawn to your personal account. Personal tax and ACC come off Owner Pay, and ' +
-        'Donate/Save/Invest/Spend split what remains. GST is held for the IRD and sits outside the split.'
-      : 'Pre-company rule: withheld comes off gross to give adjusted, tax/ACC to pay come off ' +
-        'adjusted to give net, and Donate/Save/Invest/Spend split the net.';
+    var WITHHELD = ['Tax Withheld', 'ACC Withheld'];
+    var OBLIGATIONS = ['Tax To Pay', 'ACC To Pay'];
+
+    var withheldAmount = 0;
+    BUDGET_CATEGORIES_UI.forEach(function(cat, i) {
+      if (WITHHELD.indexOf(cat) !== -1) {
+        withheldAmount += Math.round(gross * (Number(rule[BUDGET_PCT_FIELDS[i]]) || 0) * 100) / 100;
+      }
+    });
+    var adjusted = gross - withheldAmount;
+
+    var obligationAmount = 0;
+    BUDGET_CATEGORIES_UI.forEach(function(cat, i) {
+      if (OBLIGATIONS.indexOf(cat) !== -1) {
+        obligationAmount += Math.round(adjusted * (Number(rule[BUDGET_PCT_FIELDS[i]]) || 0) * 100) / 100;
+      }
+    });
+    var net = adjusted - obligationAmount;
 
     var html =
       '<article class="preview-card">' +
         '<header>' +
           '<h3>Preview</h3>' +
-          '<p class="muted">' + escapeHtml(data.invoice_id) + ' · ' + escapeHtml(data.business_name || '') +
-            ' · Rule: <strong>' + escapeHtml(data.rule.name) + '</strong>' +
-            (isCompany ? '' : ' <span class="tag">sole trader</span>') + '</p>' +
+          '<p class="muted">' + escapeHtml(inv.invoice_id) + ' · ' + escapeHtml((data.business && data.business.name) || '') +
+            ' · Rule: <strong>' + escapeHtml(rule.name) + '</strong></p>' +
         '</header>' +
-        '<div class="preview-numbers">' + cascadeRows(data.model, stages, currency) + '</div>' +
-        '<p class="muted" style="font-size:0.78rem;margin:0 0 0.5rem;">' + explainer + '</p>' +
-        '<div class="scroll-x"><table class="data-table">' +
-          '<thead><tr><th>Pot</th><th>Category</th><th class="number">%</th><th class="number">Amount</th><th>From</th></tr></thead><tbody>';
+        '<div class="preview-numbers">' +
+          '<div><span class="muted">Gross (billed hours)</span><strong>' + formatCurrency(gross, currency) + '</strong></div>' +
+          (withheldAmount > 0 ? '<div><span class="muted">Withheld (at source)</span><strong>&minus;' + formatCurrency(withheldAmount, currency) + '</strong></div>' : '') +
+          '<div><span class="muted">Adjusted</span><strong>' + formatCurrency(adjusted, currency) + '</strong></div>' +
+          (obligationAmount > 0 ? '<div><span class="muted">Obligations (Tax/ACC to pay)</span><strong>&minus;' + formatCurrency(obligationAmount, currency) + '</strong></div>' : '') +
+          '<div><span class="muted">Net to distribute</span><strong>' + formatCurrency(net, currency) + '</strong></div>' +
+        '</div>' +
+        '<p class="muted" style="font-size:0.78rem;margin:0 0 0.5rem;">' +
+          'Budget is allocated from billed hours only (expenses are pass-throughs). ' +
+          'Withheld categories are deducted from gross to give adjusted. ' +
+          'Tax/ACC to pay are deducted from adjusted to give net. ' +
+          'Distribution categories (Donate/Save/Invest/Spend) split the net.' +
+        '</p>' +
+        '<table class="data-table">' +
+          '<thead><tr><th>Category</th><th class="number">%</th><th class="number">Amount</th><th>Note</th></tr></thead><tbody>';
 
-    var basisNote = {
-      gross: 'Gross',
-      invoice_gst: 'Invoice GST',
-      business_income: 'Business income',
-      remainder: 'Remainder after business allocations',
-      owner_pay: 'Owner Pay',
-      personal_net: 'Personal net',
-      adjusted: 'Adjusted',
-      net: 'Net'
-    };
-
-    var lastScope = null;
-    lines.forEach(function(line) {
-      if (line.scope !== lastScope) {
-        lastScope = line.scope;
-        html += '<tr class="group-row"><td colspan="5">' + escapeHtml(allocationScopeLabel(line.scope)) + '</td></tr>';
+    var allocTotal = 0;
+    BUDGET_CATEGORIES_UI.forEach(function(cat, i) {
+      if (cat === 'GST Collected') {
+        if (gstAmount > 0) {
+          allocTotal += gstAmount;
+          html += '<tr>' +
+            '<td>' + escapeHtml(cat) + '</td>' +
+            '<td class="number">—</td>' +
+            '<td class="number">' + formatCurrency(gstAmount, currency) + '</td>' +
+            '<td class="muted">From invoice GST</td>' +
+          '</tr>';
+        }
+        return;
       }
+      var pct = Number(rule[BUDGET_PCT_FIELDS[i]]) || 0;
+      var isWithheld = WITHHELD.indexOf(cat) !== -1;
+      var isObligation = OBLIGATIONS.indexOf(cat) !== -1;
+      var amount;
+      var note;
+      if (isWithheld) {
+        amount = Math.round(gross * pct * 100) / 100;
+        note = 'From gross';
+      } else if (isObligation) {
+        amount = Math.round(adjusted * pct * 100) / 100;
+        note = 'From adjusted';
+      } else {
+        amount = Math.round(net * pct * 100) / 100;
+        note = 'From net';
+      }
+      allocTotal += amount;
       html += '<tr>' +
-        '<td><span class="pot-tag pot-tag--' + escapeHtml(line.scope) + '">' + escapeHtml(allocationScopeLabel(line.scope)) + '</span></td>' +
-        '<td>' + escapeHtml(line.label) +
-          (line.settle === 'auto_paid' ? ' <span class="tag tag--auto">at source</span>' : '') +
-          (line.isTransfer ? ' <span class="tag">transfer</span>' : '') + '</td>' +
-        '<td class="number">' + (line.pct == null ? '—' : formatPercent(line.pct)) + '</td>' +
-        '<td class="number">' + formatCurrency(line.amount, currency) + '</td>' +
-        '<td class="muted">' + escapeHtml(basisNote[line.basis] || '') + '</td>' +
+        '<td>' + escapeHtml(cat) + (isWithheld ? ' <span class="tag tag--auto">auto-paid</span>' : '') + '</td>' +
+        '<td class="number">' + formatPercent(pct) + '</td>' +
+        '<td class="number">' + formatCurrency(amount, currency) + '</td>' +
+        '<td class="muted">' + note + '</td>' +
       '</tr>';
     });
 
-    // Expenses are billed but never allocated, so the allocation total only
-    // matches the invoice total when there are none. Say which it is rather
-    // than claiming they always agree.
-    var allocatedBase = (Number(stages.gross) || 0) + (Number(stages.gst) || 0);
-    html += '<tr class="total-row"><td colspan="2"><strong>Total (excl. Owner Pay transfer)</strong></td><td></td>' +
-      '<td class="number"><strong>' + formatCurrency(data.total, currency) + '</strong></td>' +
-      '<td class="muted">billed hours + GST</td></tr>';
-    html += '</tbody></table></div>' +
-      '<p class="muted small" style="margin:0.4rem 0 0.5rem;">' +
-        'Allocating ' + formatCurrency(allocatedBase, currency) + ' of billed hours and GST. ' +
-        'Any expenses on this invoice are reimbursements and are deliberately left out.' +
-      '</p>' +
+    html += '<tr class="total-row"><td><strong>Total</strong></td><td></td>' +
+      '<td class="number"><strong>' + formatCurrency(allocTotal, currency) + '</strong></td>' +
+      '<td></td></tr>';
+    html += '</tbody></table>' +
       '<div class="form-actions">' +
         '<button type="button" class="btn-primary" onclick="confirmAllocation()">Confirm allocation</button>' +
         '<button type="button" class="btn-subtle" onclick="document.getElementById(\'allocation-preview\').innerHTML=\'\'">Cancel</button>' +

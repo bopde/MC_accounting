@@ -10,7 +10,6 @@ function addTimeEntry(data) {
   if (!data.business_id || !data.date || !data.time_start || !data.time_end || !data.work_code) {
     throw new Error('Missing required fields.');
   }
-  data.date = requireDate(data.date, 'Date');
 
   var start = parseTime(data.date, data.time_start);
   var end = parseTime(data.date, data.time_end);
@@ -20,8 +19,7 @@ function addTimeEntry(data) {
   }
 
   if (end <= start) {
-    throw new Error('End time must be after start time. An entry cannot cross midnight — ' +
-      'log the two halves as separate entries.');
+    throw new Error('End time must be after start time.');
   }
 
   var hours = (end - start) / (1000 * 60 * 60);
@@ -52,13 +50,9 @@ function addTimeEntry(data) {
  * Add an expense entry.
  */
 function addExpense(data) {
-  if (!data.business_id || !data.work_code) {
+  if (!data.business_id || !data.date || !data.work_code) {
     throw new Error('Missing required fields.');
   }
-  // Guarded because nothing downstream would complain: an unparseable date
-  // writes fine and is then skipped by every date filter in the app, so the
-  // expense exists in the sheet and nowhere in the UI.
-  var date = requireDate(data.date, 'Date');
 
   var amount = Number(data.amount);
   if (isNaN(amount) || amount < 0) {
@@ -67,7 +61,7 @@ function addExpense(data) {
 
   return appendRow('Expenses', {
     business_id: data.business_id,
-    date: date,
+    date: data.date,
     amount: amount,
     description: data.description,
     work_code: data.work_code,
@@ -127,15 +121,6 @@ function getExpenses(filters) {
  * Update an existing time entry. Blocked if already invoiced.
  */
 function updateTimeEntry(data) {
-  // Locked: findById resolves a _rowIndex that another execution — or a row
-  // deleted in the Sheets UI — can shift before the write lands, silently
-  // overwriting or removing a different entry.
-  return withScriptLock(function() {
-    return updateTimeEntryLocked(data);
-  });
-}
-
-function updateTimeEntryLocked(data) {
   var entry = findById('TimeEntries', data.entry_id);
   if (!entry) throw new Error('Time entry not found: ' + data.entry_id);
   if (entry.invoice_id && entry.invoice_id !== '') {
@@ -145,15 +130,11 @@ function updateTimeEntryLocked(data) {
   if (!data.business_id || !data.date || !data.time_start || !data.time_end || !data.work_code) {
     throw new Error('Missing required fields.');
   }
-  data.date = requireDate(data.date, 'Date');
 
   var start = parseTime(data.date, data.time_start);
   var end = parseTime(data.date, data.time_end);
   if (isNaN(start.getTime()) || isNaN(end.getTime())) throw new Error('Invalid date or time values.');
-  if (end <= start) {
-    throw new Error('End time must be after start time. An entry cannot cross midnight — ' +
-      'log the two halves as separate entries.');
-  }
+  if (end <= start) throw new Error('End time must be after start time.');
 
   var hours = Math.round((end - start) / (1000 * 60 * 60) * 100) / 100;
   var rate = Number(data.rate);
@@ -179,15 +160,6 @@ function updateTimeEntryLocked(data) {
  * Delete a time entry. Blocked if already invoiced.
  */
 function deleteTimeEntry(entryId) {
-  // Locked: findById resolves a _rowIndex that another execution — or a row
-  // deleted in the Sheets UI — can shift before the write lands, silently
-  // overwriting or removing a different entry.
-  return withScriptLock(function() {
-    return deleteTimeEntryLocked(entryId);
-  });
-}
-
-function deleteTimeEntryLocked(entryId) {
   var entry = findById('TimeEntries', entryId);
   if (!entry) throw new Error('Time entry not found: ' + entryId);
   if (entry.invoice_id && entry.invoice_id !== '') {
@@ -201,31 +173,21 @@ function deleteTimeEntryLocked(entryId) {
  * Update an existing expense. Blocked if already invoiced.
  */
 function updateExpense(data) {
-  // Locked: findById resolves a _rowIndex that another execution — or a row
-  // deleted in the Sheets UI — can shift before the write lands, silently
-  // overwriting or removing a different entry.
-  return withScriptLock(function() {
-    return updateExpenseLocked(data);
-  });
-}
-
-function updateExpenseLocked(data) {
   var expense = findById('Expenses', data.expense_id);
   if (!expense) throw new Error('Expense not found: ' + data.expense_id);
   if (expense.invoice_id && expense.invoice_id !== '') {
     throw new Error('Cannot edit an invoiced expense. Void the invoice first.');
   }
 
-  if (!data.business_id || !data.work_code) {
+  if (!data.business_id || !data.date || !data.work_code) {
     throw new Error('Missing required fields.');
   }
-  var date = requireDate(data.date, 'Date');
 
   var amount = Number(data.amount);
   if (isNaN(amount) || amount < 0) throw new Error('Amount must be a non-negative number.');
 
   expense.business_id = data.business_id;
-  expense.date = date;
+  expense.date = data.date;
   expense.amount = amount;
   expense.description = data.description;
   expense.work_code = data.work_code;
@@ -238,15 +200,6 @@ function updateExpenseLocked(data) {
  * Delete an expense. Blocked if already invoiced.
  */
 function deleteExpense(expenseId) {
-  // Locked: findById resolves a _rowIndex that another execution — or a row
-  // deleted in the Sheets UI — can shift before the write lands, silently
-  // overwriting or removing a different entry.
-  return withScriptLock(function() {
-    return deleteExpenseLocked(expenseId);
-  });
-}
-
-function deleteExpenseLocked(expenseId) {
   var expense = findById('Expenses', expenseId);
   if (!expense) throw new Error('Expense not found: ' + expenseId);
   if (expense.invoice_id && expense.invoice_id !== '') {

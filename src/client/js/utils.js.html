@@ -19,7 +19,6 @@ var AppCache = {
   workCodes: null,
   accounts: null,
   budgetRules: null,
-  budgetCategories: null,
   contracts: null,
   myDetails: null,
 
@@ -28,176 +27,10 @@ var AppCache = {
     this.workCodes = null;
     this.accounts = null;
     this.budgetRules = null;
-    this.budgetCategories = null;
     this.contracts = null;
     this.myDetails = null;
   }
 };
-
-/**
- * Budget category definitions, served by the registry in BudgetCategories.gs.
- * The front end keeps no list of its own — every ordering, label and
- * percentage field comes from here.
- */
-function budgetCategoryDefs() {
-  var reg = AppCache.budgetCategories;
-  return (reg && reg.categories) || [];
-}
-
-function budgetCategoryDefsInGroup(group) {
-  return budgetCategoryDefs().filter(function(d) { return d.group === group; });
-}
-
-/**
- * Settlement mode metadata, from the server registry. Falls back to sensible
- * wording if the registry has not loaded.
- */
-function settleMode(settle) {
-  var reg = AppCache.budgetCategories;
-  var modes = (reg && reg.settleModes) || {};
-  return modes[settle] || { key: settle, groupLabel: 'Other', verb: 'Mark Paid', settledWord: 'moved' };
-}
-
-/**
- * The verb on a Money Flow action button, and the same act as a noun.
- *
- * Every button says "Pay", whatever the bucket's settle mode. Pay / Set aside
- * / Transfer described the same act — money leaving the account it is sitting
- * in — in three words, which made the page read as three mechanisms when
- * there is only one. The settle mode still decides whether a bucket HAS a
- * button (withheld money does not) and still drives the wording where it is
- * describing what happened rather than offering an action.
- */
-function settleShortVerb(settle) {
-  return settle === 'auto_paid' ? '' : 'Pay';
-}
-
-function settleNoun(settle) {
-  return settle === 'auto_paid' ? '' : 'payment';
-}
-
-function settleActionLabel(settle) {
-  return settleMode(settle).verb || 'Mark Paid';
-}
-
-function settleGroupOrder() {
-  var reg = AppCache.budgetCategories;
-  return (reg && reg.settleGroupOrder) || ['pay', 'hold', 'transfer', 'auto_paid'];
-}
-
-/**
- * Human label for an allocation scope ('business' -> 'Business').
- */
-function allocationScopeLabel(scope) {
-  var reg = AppCache.budgetCategories;
-  var scopes = (reg && reg.scopes) || [];
-  var found = scopes.find(function(s) { return s.scope === scope; });
-  return found ? found.label : scope;
-}
-
-/**
- * How the registry's buckets are grouped for display. Shared by the Budget page
- * and the Dashboard so the two cannot drift — and declared here, in the first
- * file the page includes, rather than in one screen's module: dashboard.js is
- * included BEFORE budget.js, so a grouping owned by budget.js would be a
- * load-order accident waiting to break.
- *
- * `keys` are registry category keys; where a company bucket has a sole-trader
- * counterpart both are listed so they merge into one figure, and `legacyKeys`
- * names the sole-trader part so the UI can call it out.
- *
- * Tax and ACC WITHHELD AT SOURCE belong to the obligation they settled.
- * A payer who withheld tax on a sole-trader invoice paid that tax to the IRD
- * on your behalf — it came out of the same obligation, it just never passed
- * through your account. Leaving it in a box of its own understated every tax
- * figure by the amount already paid, and made the page ask what to do with
- * money that needs nothing done. `withheldKeys` marks that portion so it can
- * be named, and kept out of what a payment is applied to.
- */
-var BIZ_OBLIGATIONS = [
-  { label: 'Tax to pay', keys: ['biz_tax', 'biz_tax_withheld'],
-    withheldKeys: ['biz_tax_withheld'] },
-  // GST registration began with the company, so there is no sole-trader GST —
-  // but fold legacy_gst in rather than silently dropping a row that does exist.
-  { label: 'GST to pay', keys: ['biz_gst', 'legacy_gst'], legacyKeys: ['legacy_gst'] },
-  { label: 'ACC to pay', keys: ['biz_acc', 'biz_acc_withheld'],
-    withheldKeys: ['biz_acc_withheld'] }
-];
-
-var PERSONAL_OBLIGATIONS = [
-  { label: 'Tax to pay', keys: ['per_tax', 'legacy_tax', 'legacy_tax_withheld'],
-    legacyKeys: ['legacy_tax', 'legacy_tax_withheld'],
-    withheldKeys: ['legacy_tax_withheld'] },
-  { label: 'ACC to pay', keys: ['per_acc', 'legacy_acc', 'legacy_acc_withheld'],
-    legacyKeys: ['legacy_acc', 'legacy_acc_withheld'],
-    withheldKeys: ['legacy_acc_withheld'] }
-];
-
-// Displayed in this order, each merging its company and sole-trader bucket.
-var PERSONAL_ALLOCATIONS = [
-  { label: 'Save', settle: 'hold', keys: ['per_save', 'legacy_save'] },
-  { label: 'Donate', settle: 'pay', keys: ['per_donate', 'legacy_donate'] },
-  { label: 'Invest', settle: 'hold', keys: ['per_invest', 'legacy_invest'] },
-  { label: 'Spend', settle: 'transfer', keys: ['per_spend', 'legacy_spend'] }
-];
-
-/**
- * Buckets created already settled, because the payer deducted them.
- *
- * They are counted inside their obligation above. This list is what keeps them
- * out of a payment: there is nothing left to pay against money that has
- * already gone to the IRD.
- */
-var WITHHELD_KEYS = ['legacy_tax_withheld', 'legacy_acc_withheld', 'biz_tax_withheld', 'biz_acc_withheld'];
-
-function isWithheldKey(key) {
-  return WITHHELD_KEYS.indexOf(key) !== -1;
-}
-
-/**
- * Sheets hands booleans back as true, 'TRUE' or 'true' depending on how the
- * cell was written.
- */
-function isFlagTrue(val) {
-  return val === true || val === 'TRUE' || val === 'true';
-}
-
-/**
- * Which cascade a rule's percentages belong to. Mirrors ruleModel() in
- * BudgetCategories.gs: a stored model wins, otherwise a rule is only sole
- * trader if it actually has legacy percentages. A rule with neither was written
- * by the company form before the `model` column existed, and treating it as
- * legacy would strand it in a table where it cannot be repaired.
- */
-function ruleModelOf(rule) {
-  var stored = String((rule && rule.model) || '');
-  if (stored === 'company') return 'company';
-  if (stored === 'sole_trader') return 'sole_trader';
-
-  var reg = AppCache.budgetCategories;
-  var legacyDefs = (reg && reg.legacy) || [];
-  var hasLegacyPct = legacyDefs.some(function(d) {
-    return d.pctField && (Number(rule[d.pctField]) || 0) !== 0;
-  });
-  return hasLegacyPct ? 'sole_trader' : 'company';
-}
-
-/**
- * Escape a value for use inside a single-quoted JS string in an HTML attribute,
- * e.g. onclick="doThing('...')".
- *
- * escapeHtml is NOT enough here: it turns ' into &#39;, the HTML parser decodes
- * that back to ' before the JS is parsed, and the string still breaks. A work
- * code like "Bob's Dev" silently killed the button it was rendered into.
- */
-function jsAttr(value) {
-  return String(value == null ? '' : value)
-    .replace(/\\/g, '\\\\')
-    .replace(/'/g, "\\'")
-    .replace(/"/g, '&quot;')
-    .replace(/</g, '\\x3C')
-    .replace(/\r?\n/g, '\\n');
-}
 
 /**
  * Promise wrapper around google.script.run with a timeout.
@@ -326,12 +159,7 @@ function normalizeMonth(val) {
  * Format a number as a percentage.
  */
 function formatPercent(value) {
-  // A blank cell is "not set", not zero — and Number(undefined) is NaN, which
-  // used to render as "NaN%".
-  if (value === '' || value === null || value === undefined) return '—';
-  var num = Number(value);
-  if (isNaN(num)) return '—';
-  return (num * 100).toFixed(1) + '%';
+  return (Number(value) * 100).toFixed(1) + '%';
 }
 
 /**
@@ -374,50 +202,8 @@ function idsMatch(a, b) {
 }
 
 function normalizeId(id) {
-  // Matches normalizeId in SheetService.gs — these are used on opposite sides
-  // of the same lookups, so they must agree.
   var s = String(id == null ? '' : id);
-  return s.replace(/^0+/, '') || '0';
-}
-
-/**
- * Warn when the spreadsheet is missing columns the code expects.
- *
- * Until setupSheets() is run after a schema change, writes lose any field whose
- * column does not exist — which is how a set of budget percentages once
- * vanished without an error. Better to say so up front.
- */
-function renderSchemaWarning(warnings, errors) {
-  var host = document.getElementById('schema-warning');
-  if (!host) return;
-
-  var parts = [];
-  if (warnings && warnings.length) {
-    parts.push('<strong>Your spreadsheet is missing columns.</strong> ' +
-      'Open the spreadsheet and choose <em>Finance Tracker &rarr; Run setup / migrations</em> ' +
-      '(or run <code>setupSheets()</code> in the Apps Script editor). Until then, saving may ' +
-      'silently lose data.<br><span class="small">' +
-      warnings.map(function(w) {
-        return escapeHtml(w.sheet) + ': ' + escapeHtml((w.missing || []).join(', '));
-      }).join('<br>') + '</span>');
-  }
-  if (errors && errors.length) {
-    parts.push('<strong>Some data could not be loaded.</strong><br><span class="small">' +
-      errors.map(escapeHtml).join('<br>') + '</span>');
-  }
-
-  if (parts.length === 0) {
-    host.innerHTML = '';
-    host.hidden = true;
-    return;
-  }
-
-  host.hidden = false;
-  host.innerHTML = '<div class="app-banner app-banner--warn">' +
-    '<div>' + parts.join('<hr>') + '</div>' +
-    '<button type="button" class="btn-small btn-subtle" ' +
-      'onclick="this.closest(\'#schema-warning\').hidden = true;">Dismiss</button>' +
-  '</div>';
+  return s.replace(/^0+/, '') || s;
 }
 
 /**
@@ -430,17 +216,14 @@ function loadReferenceData() {
     AppCache.workCodes = data.workCodes || [];
     AppCache.accounts = data.accounts || [];
     AppCache.budgetRules = data.budgetRules || [];
-    AppCache.budgetCategories = data.budgetCategories || null;
     AppCache.contracts = data.contracts || [];
     AppCache.myDetails = data.myDetails || {};
-    renderSchemaWarning(data.schemaWarnings, data.errors);
   }).catch(function(err) {
     console.warn('[bootstrap] Failed, falling back to empty cache:', err.message);
     AppCache.businesses = AppCache.businesses || [];
     AppCache.workCodes = AppCache.workCodes || [];
     AppCache.accounts = AppCache.accounts || [];
     AppCache.budgetRules = AppCache.budgetRules || [];
-    AppCache.budgetCategories = AppCache.budgetCategories || null;
     AppCache.contracts = AppCache.contracts || [];
     AppCache.myDetails = AppCache.myDetails || {};
     throw err;
@@ -539,12 +322,6 @@ function datePreset(type) {
     case '6months':
       var m6 = new Date(now); m6.setMonth(m6.getMonth() - 6);
       return { from: fmtDate(m6), to: to };
-    case 'lastMonth':
-      // Full previous calendar month — the usual invoicing period.
-      return {
-        from: fmtDate(new Date(y, now.getMonth() - 1, 1)),
-        to: fmtDate(new Date(y, now.getMonth(), 0))
-      };
     case 'ytd':
       return { from: y + '-01-01', to: to };
     default:
