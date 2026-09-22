@@ -241,7 +241,9 @@ check('sub-figures name both sources',
 console.log('\nHeader 4 — Allocations');
 check('header present', html.indexOf('>Allocations ') !== -1);
 check('owner pay draw subheading', html.indexOf('Business: owner pay draw') !== -1);
-check('legacy withheld subheading', html.indexOf('Legacy: tax withheld') !== -1);
+check('no separate box for withheld tax — it belongs to its obligation',
+  html.indexOf('Legacy: tax withheld') === -1 &&
+  html.indexOf('Tax withheld at source') === -1);
 ['Save', 'Donate', 'Invest', 'Spend'].forEach(function(label) {
   check('box for ' + label, html.indexOf('mini-tile__label">' + label + '<') !== -1);
 });
@@ -250,8 +252,20 @@ const order = ['Save', 'Donate', 'Invest', 'Spend']
 check('buckets in the requested order', order.every(function(v, i) { return i === 0 || v > order[i - 1]; }));
 check('no per-invoice rows in the overview — that is what the history is for',
   html.indexOf('<code>0526</code>') === -1 && html.indexOf('<code>0425</code>') === -1);
-check('withheld money offers no action',
-  (html.split('Legacy: tax withheld')[1] || '').indexOf('<button') === -1);
+// The fixture withheld $100 of tax on the sole-trader invoice. It is already
+// paid, so it must raise Paid without raising what is still to pay, and a
+// payment must never be aimed at it.
+const personalTax = /<h4>Personal<\/h4>[\s\S]*?mini-tile__label">Tax to pay<[\s\S]*?<\/div>\s*<\/div>\s*<\/div>/.exec(html);
+check('the personal tax box counts withheld tax as paid',
+  !!personalTax && /Paid \$300\.00/.test(personalTax[0]),
+  personalTax ? personalTax[0].slice(0, 400) : 'box not found');
+check('and counts it towards the total, not towards what is owed',
+  !!personalTax && /of \$1,267\.00/.test(personalTax[0]) && /\$967\.00/.test(personalTax[0]));
+check('the box says why Paid is more than you have paid',
+  html.indexOf('$100.00 already withheld at source') !== -1);
+check('a payment is never aimed at the withheld bucket',
+  html.indexOf("'per_tax,legacy_tax'") !== -1 &&
+  html.indexOf('legacy_tax_withheld') === -1);
 
 console.log('\nOverview actions');
 function verbFor(label) {
@@ -314,6 +328,9 @@ check('per-invoice rows live here', history.indexOf('<code>0526</code>') !== -1 
 check('company and sole-trader money share one Spend block',
   /Spend<\/h4>[\s\S]*?<code>0425<\/code>/.test(history) && /Spend<\/h4>[\s\S]*?<code>0526<\/code>/.test(history));
 check('progress bars per bucket', (history.match(/progress-bar__fill/g) || []).length >= 5);
+check('withheld tax is listed inside its obligation, not in a box of its own',
+  history.indexOf('Tax withheld at source') === -1 &&
+  /Tax to pay<\/h4>[\s\S]*?<code>0425<\/code>/.test(history));
 check('a part-paid allocation is labelled as such', history.indexOf('badge-part-paid') !== -1);
 check('the settled column is shown per allocation', history.indexOf('>Settled</th>') !== -1);
 check('history is read-only apart from undo',
@@ -327,18 +344,22 @@ check('no undefined or NaN leaked into the markup', !/undefined|NaN/.test(page))
 // revenue is the business box plus sole trader; the personal box is the
 // overlapping view and deliberately plays no part in this identity.
 const invoicedRevenue = tiles[0] + 1000;
-const withheldShown = 100;
 // Against ALLOCATED obligations: the header shows what is still owed, which
 // falls as payments are recorded, but the identity is about where the money
 // was assigned, not how much of it has left the account yet.
+//
+// No `+ withheld` term any more: withholding is inside the obligation it
+// settled, so revenue less obligations is exactly what is left.
 const obligationsAllocated = cli.sumCats(cats,
   cli.BIZ_OBLIGATIONS.concat(cli.PERSONAL_OBLIGATIONS)
     .reduce(function(keys, row) { return keys.concat(row.keys); }, [])).allocated;
 check('the displayed sections reconcile',
-  Math.abs((invoicedRevenue - obligationsAllocated) -
-    (sectionTotal('Total income') + withheldShown)) < 0.02);
-check('payments reduce what is owed without moving what was allocated',
-  Math.abs(obligationsAllocated - sectionTotal('Total obligations') - 950) < 0.02);
+  Math.abs((invoicedRevenue - obligationsAllocated) - sectionTotal('Total income')) < 0.02,
+  'revenue ' + invoicedRevenue + ' - obligations ' + obligationsAllocated +
+  ' vs income ' + sectionTotal('Total income'));
+// $750 GST + $200 personal tax paid, and $100 withheld at source.
+check('payments and withholding both count as paid',
+  Math.abs(obligationsAllocated - sectionTotal('Total obligations') - 1050) < 0.02);
 
 // --- Dashboard budget tile, over the same allocations ---
 
