@@ -13,29 +13,41 @@ function getSpreadsheet() {
 }
 
 /**
- * Creates all sheets with headers. Safe to run multiple times -
- * skips sheets that already exist.
+ * The declared shape of every sheet: sheet name -> ordered column headers.
+ *
+ * Declared as a function rather than inline in setupSheets() so the schema can
+ * be read without running setup — checkSchema() uses it to warn when a sheet
+ * is missing columns, which is otherwise only discovered when a write silently
+ * loses data.
+ *
+ * Column ORDER here only applies to sheets created from scratch. migrateColumns
+ * appends to existing sheets, so a migrated column lands last regardless; every
+ * read and write resolves columns by header name, never position.
  */
-function setupSheets() {
-  var ss = getSpreadsheet();
-
-  var schemas = {
+function sheetSchemas() {
+  return {
     'Businesses': [
       'business_id', 'name', 'contact_name', 'email', 'address',
-      'default_rate', 'currency', 'active'
+      'default_rate', 'currency', 'invoice_code', 'active'
     ],
     'WorkCodes': [
       'code_id', 'description', 'category', 'contract_id', 'active'
     ],
     'Accounts': [
-      'account_id', 'name', 'type', 'currency', 'purpose', 'active'
+      'account_id', 'name', 'type', 'currency', 'scope', 'purpose', 'active'
     ],
+    // Legacy sole-trader percentage columns are retained so historical rules
+    // keep working; company rules use the biz_/per_ columns.
     'BudgetRules': [
-      'rule_id', 'name',
+      'rule_id', 'name', 'model',
       'tax_withheld_pct', 'tax_to_pay_pct',
       'acc_withheld_pct', 'acc_to_pay_pct',
       'donate_pct', 'save_pct', 'invest_pct', 'spend_pct',
-      'is_default', 'notes'
+      'biz_tax_withheld_pct', 'biz_acc_withheld_pct',
+      'biz_tax_pct', 'biz_acc_pct', 'biz_reserve_pct',
+      'per_tax_pct', 'per_acc_pct',
+      'per_donate_pct', 'per_save_pct', 'per_invest_pct', 'per_spend_pct',
+      'is_default', 'notes', 'active'
     ],
     'MyDetails': [
       'key', 'value'
@@ -60,9 +72,21 @@ function setupSheets() {
       'status', 'budget_rule_id', 'contract_id', 'po_number',
       'description', 'notes', 'line_descriptions'
     ],
+    // `paid_amount` is how much of `amount` has actually been paid, so a
+    // payment need not settle a whole allocation. `status` is kept in step
+    // ('paid' once paid_amount covers amount) for rows written before it
+    // existed, where a blank paid_amount means "status is the whole truth".
     'BudgetAllocations': [
-      'allocation_id', 'invoice_id', 'category', 'percentage',
-      'amount', 'status', 'transfer_date', 'notes'
+      'allocation_id', 'invoice_id', 'category', 'category_key', 'scope',
+      'percentage', 'amount', 'status', 'paid_amount', 'transfer_date', 'notes'
+    ],
+    // One row per payment made against a budget category. `covered` records
+    // exactly which allocations the money was applied to and how much each
+    // got, in the form 'BA-002:252;BA-003:18', so a payment can be undone
+    // precisely rather than by re-deriving it.
+    'BudgetPayments': [
+      'payment_id', 'payment_date', 'category_key', 'category', 'scope',
+      'amount', 'notes', 'covered', 'created_date'
     ],
     'AccountSummaries': [
       'summary_id', 'account_id', 'month', 'ending_balance',
@@ -70,6 +94,45 @@ function setupSheets() {
       'total_in', 'total_out', 'notes'
     ]
   };
+}
+
+/**
+ * Report any declared column that is missing from a sheet.
+ * Returns [{sheet, missing:[...]}] — empty when the spreadsheet is up to date.
+ *
+ * Writes fail loudly on a missing column (see assertKnownColumns), but by then
+ * the user has already lost the form they filled in. This lets the app warn
+ * first.
+ */
+function checkSchema() {
+  var ss = getSpreadsheet();
+  var schemas = sheetSchemas();
+  var warnings = [];
+
+  Object.keys(schemas).forEach(function(sheetName) {
+    var sheet = ss.getSheetByName(sheetName);
+    if (!sheet) {
+      warnings.push({ sheet: sheetName, missing: schemas[sheetName].slice() });
+      return;
+    }
+    var lastCol = sheet.getLastColumn();
+    var headers = lastCol > 0 ? sheet.getRange(1, 1, 1, lastCol).getValues()[0] : [];
+    var missing = schemas[sheetName].filter(function(col) {
+      return headers.indexOf(col) === -1;
+    });
+    if (missing.length > 0) warnings.push({ sheet: sheetName, missing: missing });
+  });
+
+  return warnings;
+}
+
+/**
+ * Creates all sheets with headers. Safe to run multiple times -
+ * skips sheets that already exist.
+ */
+function setupSheets() {
+  var ss = getSpreadsheet();
+  var schemas = sheetSchemas();
 
   var existingSheets = ss.getSheets().map(function(s) { return s.getName(); });
 
@@ -114,8 +177,180 @@ function setupSheets() {
   // Add missing columns to existing sheets
   migrateColumns(ss, schemas);
 
+  // Backfill identity columns on pre-company allocations, then make sure a
+  // company rule exists so the Allocate tab is usable straight away.
+  migrateBudgetAllocations();
+  migrateAllocationPaidAmounts();
+  seedCompanyBudgetRule();
+
   Logger.log('Setup complete!');
   return 'Setup complete! Created sheets: ' + Object.keys(schemas).join(', ');
+}
+
+/**
+ * Stamp category_key and scope onto BudgetAllocations rows written before the
+ * business/personal split. Idempotent: rows that already carry a category_key
+ * are left alone, and nothing is written when there is nothing to stamp.
+ *
+ * Amounts, labels and statuses are never touched — only the two new identity
+ * columns are filled, so historical figures stay exactly as they were.
+ */
+function migrateBudgetAllocations() {
+  var ss = getSpreadsheet();
+  var sheet = ss.getSheetByName('BudgetAllocations');
+  if (!sheet) return 0;
+
+  var lastRow = sheet.getLastRow();
+  var lastCol = sheet.getLastColumn();
+  if (lastRow < 2 || lastCol < 1) return 0;
+
+  var headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+  var invCol = headers.indexOf('invoice_id');
+  var catCol = headers.indexOf('category');
+  var keyCol = headers.indexOf('category_key');
+  var scopeCol = headers.indexOf('scope');
+  if (invCol === -1 || catCol === -1 || keyCol === -1 || scopeCol === -1) {
+    Logger.log('migrateBudgetAllocations: columns missing, run setupSheets first');
+    return 0;
+  }
+
+  var values = sheet.getRange(2, 1, lastRow - 1, lastCol).getValues();
+
+  // Decide per INVOICE, not per row. The company labels Donate/Save/Invest/
+  // Spend and Tax/ACC Withheld are identical to the legacy ones, so a single
+  // row is ambiguous — but a whole invoice is not: only a company allocation
+  // can contain 'Business Tax', 'Reserve', 'Owner Pay' and friends. So if any
+  // row in an invoice's set carries a company-exclusive label, every row in
+  // that set is a company allocation.
+  var companyInvoices = {};
+  values.forEach(function(row) {
+    if (isCompanyOnlyLabel(String(row[catCol]))) {
+      companyInvoices[normalizeId(row[invCol])] = true;
+    }
+  });
+
+  var keys = [];
+  var scopes = [];
+  var stamped = 0;
+
+  values.forEach(function(row) {
+    var existing = row[keyCol];
+    if (existing !== '' && existing !== null && existing !== undefined) {
+      keys.push([existing]);
+      scopes.push([row[scopeCol]]);
+      return;
+    }
+
+    var label = String(row[catCol]);
+    var isCompany = !!companyInvoices[normalizeId(row[invCol])];
+    var key = isCompany
+      ? (COMPANY_LABEL_TO_KEY[label] || '')
+      : (LEGACY_LABEL_TO_KEY[label] || '');
+
+    var def = key ? getCategoryDef(key) : null;
+    keys.push([key]);
+    scopes.push([def ? def.scope : row[scopeCol]]);
+    if (key) stamped++;
+  });
+
+  if (stamped > 0) {
+    sheet.getRange(2, keyCol + 1, keys.length, 1).setValues(keys);
+    sheet.getRange(2, scopeCol + 1, scopes.length, 1).setValues(scopes);
+  }
+
+  Logger.log('migrateBudgetAllocations: stamped ' + stamped + ' row(s)');
+  return stamped;
+}
+
+/**
+ * Backfill `paid_amount` on allocations written before partial payments
+ * existed: a row marked 'paid' was paid in full, a row marked 'allocated' was
+ * not paid at all.
+ *
+ * Idempotent, and deliberately narrow — only blank cells are filled, so a
+ * partial payment recorded since is never overwritten. Amounts, labels and
+ * statuses are not touched.
+ */
+function migrateAllocationPaidAmounts() {
+  var ss = getSpreadsheet();
+  var sheet = ss.getSheetByName('BudgetAllocations');
+  if (!sheet) return 0;
+
+  var lastRow = sheet.getLastRow();
+  var lastCol = sheet.getLastColumn();
+  if (lastRow < 2 || lastCol < 1) return 0;
+
+  var headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+  var amountCol = headers.indexOf('amount');
+  var statusCol = headers.indexOf('status');
+  var paidCol = headers.indexOf('paid_amount');
+  if (amountCol === -1 || statusCol === -1 || paidCol === -1) {
+    Logger.log('migrateAllocationPaidAmounts: columns missing, run setupSheets first');
+    return 0;
+  }
+
+  var values = sheet.getRange(2, 1, lastRow - 1, lastCol).getValues();
+  var out = [];
+  var filled = 0;
+
+  values.forEach(function(row) {
+    var existing = row[paidCol];
+    if (existing !== '' && existing !== null && existing !== undefined) {
+      out.push([existing]);
+      return;
+    }
+    var paid = normaliseAllocationStatus(row[statusCol]) === 'paid'
+      ? (Number(row[amountCol]) || 0)
+      : 0;
+    out.push([paid]);
+    filled++;
+  });
+
+  if (filled > 0) sheet.getRange(2, paidCol + 1, out.length, 1).setValues(out);
+
+  Logger.log('migrateAllocationPaidAmounts: filled ' + filled + ' row(s)');
+  return filled;
+}
+
+/**
+ * Create a "Company Default" budget rule from the registry defaults if no
+ * company rule exists yet. The percentages are placeholders reflecting current
+ * NZ rates — review them before relying on the numbers.
+ */
+function seedCompanyBudgetRule() {
+  var rules;
+  try {
+    rules = getAll('BudgetRules');
+  } catch (e) {
+    return null;
+  }
+
+  // Guard on the name as well as the model: if the `model` column is missing,
+  // ruleModel() can never report company, and this would append another
+  // 'Company Default' on every run, each one stealing is_default.
+  var SEED_NAME = 'Company Default';
+  var alreadySeeded = rules.some(function(r) {
+    return ruleModel(r) === MODEL_COMPANY || String(r.name || '').trim() === SEED_NAME;
+  });
+  if (alreadySeeded) {
+    Logger.log('seedCompanyBudgetRule: company rule already exists, skipping');
+    return null;
+  }
+
+  var data = {
+    name: SEED_NAME,
+    model: MODEL_COMPANY,
+    is_default: true,
+    notes: 'Seeded defaults — review every percentage before relying on it.'
+  };
+  BUDGET_CATEGORY_DEFS.forEach(function(def) {
+    if (!def.pctField) return;
+    data[def.pctField] = def.defaultPct == null ? 0 : def.defaultPct;
+  });
+
+  var created = addBudgetRule(data);
+  Logger.log('seedCompanyBudgetRule: created ' + created.rule_id);
+  return created;
 }
 
 /**

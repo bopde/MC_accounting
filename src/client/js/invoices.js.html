@@ -78,7 +78,7 @@ function renderInvoiceList() {
         '<td class="number"><strong>' + formatCurrency(inv.total, cur) + '</strong></td>' +
         '<td><span class="badge badge-' + escapeHtml(inv.status) + '">' + escapeHtml(inv.status) + '</span></td>' +
         '<td class="actions">' +
-          '<button type="button" class="btn-small" onclick="viewInvoice(\'' + inv.invoice_id + '\')">View</button> ' +
+          '<button type="button" class="btn-small" onclick="viewInvoice(\'' + jsAttr(inv.invoice_id) + '\')">View</button> ' +
           buildStatusButton(inv) +
         '</td>' +
         '</tr>';
@@ -95,13 +95,13 @@ function renderInvoiceList() {
 function buildStatusButton(inv) {
   var html = '';
   if (inv.status === 'draft') {
-    html += '<button type="button" class="btn-small" onclick="changeInvoiceStatus(\'' + inv.invoice_id + '\', \'sent\')">Mark Sent</button> ';
-    html += '<button type="button" class="btn-small btn-subtle" onclick="voidInvoice(\'' + inv.invoice_id + '\')">Void</button>';
+    html += '<button type="button" class="btn-small" onclick="changeInvoiceStatus(\'' + jsAttr(inv.invoice_id) + '\', \'sent\')">Mark Sent</button> ';
+    html += '<button type="button" class="btn-small btn-subtle" onclick="voidInvoice(\'' + jsAttr(inv.invoice_id) + '\')">Void</button>';
   } else if (inv.status === 'sent') {
-    html += '<button type="button" class="btn-small btn-primary" onclick="changeInvoiceStatus(\'' + inv.invoice_id + '\', \'paid\')">Mark Paid</button> ';
-    html += '<button type="button" class="btn-small btn-subtle" onclick="voidInvoice(\'' + inv.invoice_id + '\')">Void</button>';
+    html += '<button type="button" class="btn-small btn-primary" onclick="changeInvoiceStatus(\'' + jsAttr(inv.invoice_id) + '\', \'paid\')">Mark Paid</button> ';
+    html += '<button type="button" class="btn-small btn-subtle" onclick="voidInvoice(\'' + jsAttr(inv.invoice_id) + '\')">Void</button>';
   } else if (inv.status === 'paid') {
-    html += '<button type="button" class="btn-small btn-subtle" onclick="voidInvoice(\'' + inv.invoice_id + '\')">Void</button>';
+    html += '<button type="button" class="btn-small btn-subtle" onclick="voidInvoice(\'' + jsAttr(inv.invoice_id) + '\')">Void</button>';
   }
   return html;
 }
@@ -146,7 +146,7 @@ function renderInvoiceDetail(data) {
   var html =
     '<div class="no-print invoice-toolbar">' +
       '<button type="button" class="btn-subtle" onclick="showInvoiceTab(\'list\')">&larr; Back</button> ' +
-      (canEdit ? '<button type="button" class="btn-subtle" onclick="editInvoice(\'' + inv.invoice_id + '\')">Edit</button> ' : '') +
+      (canEdit ? '<button type="button" class="btn-subtle" onclick="editInvoice(\'' + jsAttr(inv.invoice_id) + '\')">Edit</button> ' : '') +
       '<button type="button" onclick="window.print()">Print / Save PDF</button>' +
     '</div>' +
 
@@ -172,7 +172,9 @@ function renderInvoiceDetail(data) {
           (my.email ? '<div>' + escapeHtml(my.email) + '</div>' : '') +
           (my.phone ? '<div>' + escapeHtml(my.phone) + '</div>' : '') +
           (my.address ? '<div>' + escapeHtml(my.address).replace(/\n/g, '<br>') + '</div>' : '') +
-          (my.tax_number ? '<div class="muted">Tax #: ' + escapeHtml(my.tax_number) + '</div>' : '') +
+          // Only the GST number belongs on an invoice. The IRD number is still
+          // held in Settings for reference, but printing it puts a tax
+          // identifier on a document that goes to clients for no reason.
           (my.gst_number ? '<div class="muted">GST #: ' + escapeHtml(my.gst_number) + '</div>' : '') +
         '</div>' +
         '<div class="party-right">' +
@@ -269,22 +271,53 @@ function renderInvoiceDetail(data) {
 
   if (data.allocations && data.allocations.length > 0) {
     html += '<section class="no-print"><h4 class="section-label">Budget Allocations</h4>' +
-      '<table class="data-table"><thead><tr>' +
-      '<th>Category</th><th class="number">%</th><th class="number">Amount</th><th>Status</th>' +
+      '<div class="scroll-x"><table class="data-table"><thead><tr>' +
+      '<th>Pot</th><th>Category</th><th class="number">%</th><th class="number">Amount</th><th>Status</th>' +
       '</tr></thead><tbody>';
     data.allocations.forEach(function(a) {
-      var status = (a.status === 'transferred' || a.status === 'reconciled') ? 'paid' : (a.status === 'pending' ? 'allocated' : a.status);
+      var status = (a.status === 'transferred' || a.status === 'reconciled')
+        ? 'paid' : (a.status === 'pending' ? 'allocated' : a.status);
+      var scope = a.scope || '';
       html += '<tr>' +
+        '<td>' + (scope
+          ? '<span class="pot-tag pot-tag--' + escapeHtml(scope) + '">' + escapeHtml(allocationScopeLabel(scope)) + '</span>'
+          : '<span class="muted">—</span>') + '</td>' +
         '<td>' + escapeHtml(a.category) + '</td>' +
         '<td class="number">' + formatPercent(a.percentage) + '</td>' +
         '<td class="number">' + formatCurrency(a.amount, currency) + '</td>' +
-        '<td><span class="badge badge-' + status + '">' + status + '</span></td>' +
+        '<td><span class="badge badge-' + escapeHtml(status) + '">' + escapeHtml(status) + '</span></td>' +
         '</tr>';
     });
-    html += '</tbody></table></section>';
+    html += '</tbody></table></div>' +
+      '<p class="muted small">Allocated money is settled under Budget &rarr; Money Flow. ' +
+      'Removing the allocation puts this invoice back on the Allocate tab, and is what ' +
+      'lets a paid invoice be voided.</p>' +
+      '<div class="form-actions">' +
+        '<button type="button" class="btn-small btn-subtle" onclick="removeAllocation(\'' +
+          jsAttr(inv.invoice_id) + '\')">Remove allocation</button>' +
+      '</div>' +
+    '</section>';
   }
 
   content.innerHTML = html;
+}
+
+/**
+ * Remove an invoice's budget allocations.
+ *
+ * Voiding an allocated invoice has always been refused with "remove them
+ * first", and until now there was no way to do that from the app at all.
+ */
+function removeAllocation(invoiceId) {
+  if (!confirm('Remove this invoice\'s budget allocations?\n\n' +
+    'The invoice goes back to the Allocate tab so it can be allocated again. ' +
+    'Refused if any payment has already settled part of it — undo those first.')) return;
+
+  serverCall('deallocateInvoiceFromClient', invoiceId).then(function(result) {
+    showToast('Removed ' + result.removed + ' allocation' + (result.removed === 1 ? '' : 's'));
+    App.invalidate(['budget', 'dashboard']);
+    viewInvoice(invoiceId);
+  }).catch(function(err) { showToast(err.message, 'error'); });
 }
 
 // --- Edit Invoice ---
@@ -300,16 +333,19 @@ function editInvoice(invoiceId) {
 
     var html =
       '<div class="invoice-toolbar">' +
-        '<button type="button" class="btn-subtle" onclick="viewInvoice(\'' + invoiceId + '\')">&larr; Cancel</button>' +
+        '<button type="button" class="btn-subtle" onclick="viewInvoice(\'' + jsAttr(invoiceId) + '\')">&larr; Cancel</button>' +
       '</div>' +
       '<article>' +
         '<h3>Edit Invoice ' + escapeHtml(invoiceId) + '</h3>' +
-        '<form id="edit-invoice-form" onsubmit="submitInvoiceEdit(event, \'' + invoiceId + '\')">' +
+        '<form id="edit-invoice-form" onsubmit="submitInvoiceEdit(event, \'' + jsAttr(invoiceId) + '\')">' +
           '<label>Invoice Date' +
             '<input type="date" id="edit-inv-date" value="' + (inv.created_date || '') + '">' +
           '</label>' +
           '<label>Description' +
             '<input type="text" id="edit-inv-desc" value="' + escapeHtml(inv.description || '') + '">' +
+          '</label>' +
+          '<label>PO Number' +
+            '<input type="text" id="edit-inv-po" value="' + escapeHtml(inv.po_number || '') + '" placeholder="optional">' +
           '</label>' +
           '<label>Notes' +
             '<textarea id="edit-inv-notes" rows="3">' + escapeHtml(inv.notes || '') + '</textarea>' +
@@ -337,7 +373,7 @@ function editInvoice(invoiceId) {
 
     html += '<div class="form-actions">' +
             '<button type="submit">Save Changes</button>' +
-            '<button type="button" class="btn-subtle" onclick="viewInvoice(\'' + invoiceId + '\')">Cancel</button>' +
+            '<button type="button" class="btn-subtle" onclick="viewInvoice(\'' + jsAttr(invoiceId) + '\')">Cancel</button>' +
           '</div>' +
         '</form>' +
       '</article>';
@@ -361,6 +397,7 @@ function submitInvoiceEdit(event, invoiceId) {
     invoice_id: invoiceId,
     created_date: document.getElementById('edit-inv-date').value,
     description: document.getElementById('edit-inv-desc').value,
+    po_number: document.getElementById('edit-inv-po').value,
     notes: document.getElementById('edit-inv-notes').value,
     include_gst: document.getElementById('edit-inv-gst').checked,
     gst_rate: Number(document.getElementById('edit-inv-gst-rate').value) / 100,
@@ -377,30 +414,35 @@ function submitInvoiceEdit(event, invoiceId) {
 
 // --- Create Invoice ---
 
+// What the on-screen preview was built from. Cleared when the form is rebuilt.
+var _previewedSelection = null;
+
 function renderCreateInvoice() {
+  _previewedSelection = null;
   var businesses = AppCache.businesses || [];
   var content = document.getElementById('invoice-tab-content');
 
-  var now = new Date();
-  var lastMonthStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-  var lastMonthEnd = new Date(now.getFullYear(), now.getMonth(), 0);
-  var defaultFrom = lastMonthStart.getFullYear() + '-' +
-    String(lastMonthStart.getMonth() + 1).padStart(2, '0') + '-' +
-    String(lastMonthStart.getDate()).padStart(2, '0');
-  var defaultTo = lastMonthEnd.getFullYear() + '-' +
-    String(lastMonthEnd.getMonth() + 1).padStart(2, '0') + '-' +
-    String(lastMonthEnd.getDate()).padStart(2, '0');
+  // Defaults to the month just ended, which is the usual invoicing period —
+  // but it is stated in the form and switchable, because an unlabelled default
+  // of "last month" makes the current month's hours look missing.
+  var lastMonth = datePreset('lastMonth');
 
   content.innerHTML =
     '<form id="create-invoice-form" onsubmit="return false">' +
       '<div class="form-row">' +
         '<label>Business ' + buildSelect('inv-business', businesses, 'business_id', 'name', { required: true }) + '</label>' +
         '<label>Contract <select id="inv-contract"><option value="">All (no filter)</option></select></label>' +
+        '<label>PO Number <input type="text" id="inv-po" placeholder="optional"></label>' +
       '</div>' +
       '<div class="form-row">' +
-        '<label>From <input type="date" id="inv-from" required value="' + defaultFrom + '"></label>' +
-        '<label>To <input type="date" id="inv-to" required value="' + defaultTo + '"></label>' +
+        '<label>From <input type="date" id="inv-from" required value="' + lastMonth.from + '"></label>' +
+        '<label>To <input type="date" id="inv-to" required value="' + lastMonth.to + '"></label>' +
       '</div>' +
+      '<p class="muted small" style="margin:-0.35rem 0 0.6rem;">' +
+        'Defaults to last month (' + escapeHtml(lastMonth.from) + ' to ' + escapeHtml(lastMonth.to) + '). ' +
+        '<button type="button" class="btn-small btn-subtle" onclick="setInvoiceRange(\'lastMonth\')">Last month</button> ' +
+        '<button type="button" class="btn-small btn-subtle" onclick="setInvoiceRange(\'month\')">This month</button>' +
+      '</p>' +
       '<div class="form-row">' +
         '<label><input type="checkbox" id="inv-gst" checked> Include GST</label>' +
         '<label>GST Rate (%) <input type="number" id="inv-gst-rate" step="0.01" value="15" min="0" max="100"></label>' +
@@ -426,7 +468,44 @@ function renderCreateInvoice() {
         (c.po_number ? ' (PO: ' + escapeHtml(c.po_number) + ')' : '') + '</option>';
     });
     contractEl.innerHTML = html;
+    applyContractPoNumber();
   });
+
+  document.getElementById('inv-contract').addEventListener('change', applyContractPoNumber);
+}
+
+/**
+ * Fill the PO field from the selected contract.
+ *
+ * The field stays editable and what the user types wins — a PO can differ from
+ * the contract's, and invoices raised with no contract need one too. Only a
+ * value this function put there is replaced.
+ */
+function applyContractPoNumber() {
+  var poEl = document.getElementById('inv-po');
+  var contractEl = document.getElementById('inv-contract');
+  if (!poEl || !contractEl) return;
+
+  var typedByUser = poEl.value && poEl.value !== poEl.dataset.fromContract;
+  if (typedByUser) return;
+
+  var contract = contractEl.value
+    ? (AppCache.contracts || []).find(function(c) { return idsMatch(c.contract_id, contractEl.value); })
+    : null;
+  var po = contract ? (contract.po_number || '') : '';
+  poEl.value = po;
+  poEl.dataset.fromContract = po;
+}
+
+/**
+ * Set the create-invoice date range from a named preset.
+ */
+function setInvoiceRange(preset) {
+  var range = datePreset(preset);
+  var from = document.getElementById('inv-from');
+  var to = document.getElementById('inv-to');
+  if (from) from.value = range.from;
+  if (to) to.value = range.to;
 }
 
 function previewInvoice() {
@@ -449,8 +528,29 @@ function previewInvoice() {
   var currency = getCurrencyForBusiness(bizId);
 
   serverCall('getUninvoicedItems', { businessId: bizId, dateFrom: from, dateTo: to, contractId: contractId }).then(function(items) {
+    // Remember exactly what was previewed. The date and business inputs stay
+    // editable while the preview is on screen, so reading them again at confirm
+    // time could bill a different period than the one shown.
+    _previewedSelection = { businessId: bizId, dateFrom: from, dateTo: to, contractId: contractId };
+
     if (items.timeEntries.length === 0 && items.expenses.length === 0) {
-      preview.innerHTML = '<p class="muted">No uninvoiced items found for this period.</p>';
+      // Name what was searched — "no items for this period" reads as a data
+      // failure when the real answer is usually that the range is wrong.
+      var bizName = (AppCache.businesses || []).find(function(b) { return idsMatch(b.business_id, bizId); });
+      var contractName = '';
+      if (contractId) {
+        var con = (AppCache.contracts || []).find(function(c) { return idsMatch(c.contract_id, contractId); });
+        contractName = con ? con.name : contractId;
+      }
+      preview.innerHTML =
+        '<article class="empty-state">' +
+          '<h3>No uninvoiced items found</h3>' +
+          '<p class="muted">Searched <strong>' + escapeHtml(bizName ? bizName.name : bizId) + '</strong> ' +
+            'from <strong>' + escapeHtml(from) + '</strong> to <strong>' + escapeHtml(to) + '</strong>' +
+            (contractName ? ', contract <strong>' + escapeHtml(contractName) + '</strong>' : '') + '.</p>' +
+          '<p class="muted small">Check the dates above — the form defaults to last month. ' +
+            'Already-invoiced entries are excluded.</p>' +
+        '</article>';
       return;
     }
 
@@ -547,21 +647,35 @@ function confirmCreateInvoice() {
     }
   });
 
-  var contractEl = document.getElementById('inv-contract');
-  var contractId = contractEl ? contractEl.value : '';
-  var contract = contractId ? (AppCache.contracts || []).find(function(c) { return idsMatch(c.contract_id, contractId); }) : null;
+  // Bill what was previewed, not what the form says now.
+  var snap = _previewedSelection;
+  if (!snap) {
+    showToast('Preview the items again before creating the invoice.', 'error');
+    return;
+  }
+
+  var currentFrom = document.getElementById('inv-from').value;
+  var currentTo = document.getElementById('inv-to').value;
+  var currentBiz = document.getElementById('inv-business').value;
+  if (currentFrom !== snap.dateFrom || currentTo !== snap.dateTo || currentBiz !== snap.businessId) {
+    showToast('The business or dates changed since you previewed. Preview again to confirm what will be billed.', 'error');
+    return;
+  }
+
+  var contractId = snap.contractId || '';
+  var poEl = document.getElementById('inv-po');
 
   var params = {
-    businessId: document.getElementById('inv-business').value,
-    dateFrom: document.getElementById('inv-from').value,
-    dateTo: document.getElementById('inv-to').value,
+    businessId: snap.businessId,
+    dateFrom: snap.dateFrom,
+    dateTo: snap.dateTo,
     includeGst: document.getElementById('inv-gst').checked,
     gstRate: Number(document.getElementById('inv-gst-rate').value) / 100,
     description: document.getElementById('inv-desc').value,
     notes: document.getElementById('inv-notes').value,
     lineDescriptions: Object.keys(lineDescs).length > 0 ? lineDescs : undefined,
     contractId: contractId || undefined,
-    poNumber: contract ? contract.po_number : undefined
+    poNumber: poEl ? poEl.value.trim() : ''
   };
 
   if (!confirm('Create this invoice? Time entries and expenses will be marked as invoiced.')) return;

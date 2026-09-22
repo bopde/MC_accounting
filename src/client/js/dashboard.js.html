@@ -71,9 +71,9 @@ function renderDashContent() {
   }
 
   var html = '';
-  html += dashHours(timeEntries, bizMap);
+  html += dashHours(timeEntries, invoices, bizMap);
   html += '<div id="dash-chart-area">' + dashChart(timeEntries, bizMap) + '</div>';
-  html += dashContracts(contractProgress);
+  html += dashContracts(contractProgress, data.unattributedTime);
   if (data.budget && data.budget.length > 0) {
     html += dashBudget(data.budget);
   }
@@ -324,51 +324,84 @@ function dashStatusTiles(invoices) {
   return html;
 }
 
-function dashHours(timeEntries, bizMap) {
+function dashHours(timeEntries, invoices, bizMap) {
   var byBiz = {};
   var totalHrs = 0;
   var totalByCur = {};
+  var invoicedByCur = {};
+
+  function rowFor(bizId) {
+    var key = normalizeId(bizId);
+    if (!byBiz[key]) {
+      var biz = bizMap[key];
+      byBiz[key] = {
+        name: biz ? biz.name : 'Unknown',
+        currency: biz ? (biz.currency || 'NZD') : 'NZD',
+        hours: 0, earned: 0, invoiced: 0
+      };
+    }
+    return byBiz[key];
+  }
 
   timeEntries.forEach(function(te) {
-    var bizId = te.business_id;
-    var biz = bizMap[normalizeId(bizId)];
-    var name = biz ? biz.name : 'Unknown';
-    var cur = biz ? (biz.currency || 'NZD') : 'NZD';
-
-    if (!byBiz[bizId]) byBiz[bizId] = { name: name, currency: cur, hours: 0, earned: 0 };
-    byBiz[bizId].hours += te.hours;
-    byBiz[bizId].earned += te.line_total;
+    var row = rowFor(te.business_id);
+    row.hours += te.hours;
+    row.earned += te.line_total;
     totalHrs += te.hours;
-    totalByCur[cur] = (totalByCur[cur] || 0) + te.line_total;
+    totalByCur[row.currency] = (totalByCur[row.currency] || 0) + te.line_total;
+  });
+
+  // Invoiced time, ex-GST and excluding expenses. A business can be invoiced in
+  // a period with no hours logged in it — May's work billed in June — so rows
+  // are seeded from invoices too, not just from time entries.
+  (invoices || []).forEach(function(inv) {
+    if (inv.status === 'void') return;
+    var row = rowFor(inv.business_id);
+    var amount = Number(inv.time_subtotal) || 0;
+    row.invoiced += amount;
+    invoicedByCur[row.currency] = (invoicedByCur[row.currency] || 0) + amount;
   });
 
   var html = '<article><header><h3 style="margin:0;">Hours &amp; Earnings</h3></header>';
 
   var keys = Object.keys(byBiz);
   if (keys.length === 0) {
-    html += '<p class="muted">No time entries this period.</p>';
+    html += '<p class="muted">No time entries or invoices this period.</p>';
   } else {
-    html += '<table class="data-table data-table--compact"><thead><tr>' +
+    html += '<div class="scroll-x"><table class="data-table data-table--compact"><thead><tr>' +
       '<th>Business</th><th class="number">Hours</th><th class="number">Earned</th>' +
+      '<th class="number">Invoiced</th>' +
       '</tr></thead><tbody>';
     keys.forEach(function(k) {
       var b = byBiz[k];
       html += '<tr><td>' + escapeHtml(b.name) + '</td>' +
         '<td class="number">' + b.hours.toFixed(1) + '</td>' +
-        '<td class="number">' + formatCurrency(b.earned, b.currency) + '</td></tr>';
+        '<td class="number">' + formatCurrency(b.earned, b.currency) + '</td>' +
+        '<td class="number">' + formatCurrency(b.invoiced, b.currency) + '</td></tr>';
     });
+
+    var perCurrency = function(totals) {
+      var codes = Object.keys(totals);
+      if (codes.length === 0) return formatCurrency(0);
+      return codes.map(function(c) { return formatCurrency(totals[c], c); }).join(' / ');
+    };
+
     html += '<tr class="total-row"><td><strong>Total</strong></td>' +
       '<td class="number"><strong>' + totalHrs.toFixed(1) + '</strong></td>' +
-      '<td class="number"><strong>' +
-      Object.keys(totalByCur).map(function(c) { return formatCurrency(totalByCur[c], c); }).join(' / ') +
-      '</strong></td></tr>';
-    html += '</tbody></table>';
+      '<td class="number"><strong>' + perCurrency(totalByCur) + '</strong></td>' +
+      '<td class="number"><strong>' + perCurrency(invoicedByCur) + '</strong></td></tr>';
+    html += '</tbody></table></div>';
+
+    html += '<p class="muted small" style="margin:0.5rem 0 0;">' +
+      'Invoiced is billed time only — excludes expenses and GST. ' +
+      'Earned is time logged in this period, which is a different set of work to what was invoiced in it.' +
+      '</p>';
 
     if (totalHrs > 0) {
       var rateHtml = Object.keys(totalByCur).map(function(cur) {
         return formatCurrency(totalByCur[cur] / totalHrs, cur) + '/hr';
       }).join(', ');
-      html += '<p class="muted small" style="margin:0.5rem 0 0;">Avg rate: ' + rateHtml + '</p>';
+      html += '<p class="muted small" style="margin:0.25rem 0 0;">Avg rate: ' + rateHtml + '</p>';
     }
   }
 
@@ -376,7 +409,12 @@ function dashHours(timeEntries, bizMap) {
   return html;
 }
 
-function dashContracts(contracts) {
+/**
+ * @param unattributed {spent, hours, entries} — untagged time that two or more
+ *        overlapping contracts could each claim, so it counts towards none of
+ *        them. Shown rather than silently missing from every bar.
+ */
+function dashContracts(contracts, unattributed) {
   var html = '<article><header><h3 style="margin:0;">Contract Progress</h3>' +
     '<p class="muted small" style="margin:0.25rem 0 0;">Not affected by date selection</p></header>';
 
@@ -419,34 +457,118 @@ function dashContracts(contracts) {
     '</div>';
   });
 
-  html += '</div></article>';
+  html += '</div>';
+
+  var stray = unattributed || {};
+  if ((stray.entries || 0) > 0) {
+    html += '<p class="muted small" style="margin:0.6rem 0 0;">' +
+      formatCurrency(stray.spent) + ' across ' + Number(stray.hours).toFixed(1) +
+      ' hrs (' + stray.entries + ' entr' + (stray.entries === 1 ? 'y' : 'ies') +
+      ') is not counted above: it has no contract set and falls inside more than one ' +
+      'overlapping contract, so there is nothing to say which it belongs to. ' +
+      'Set the contract on those entries under Hours.' +
+    '</p>';
+  }
+
+  html += '</article>';
   return html;
 }
 
+/**
+ * Budget summary for the dashboard: revenue, obligations, personal allocations.
+ *
+ * The bucket groupings (BIZ_OBLIGATIONS, PERSONAL_OBLIGATIONS,
+ * PERSONAL_ALLOCATIONS) are shared globals declared in utils.js.html, which the
+ * page includes first. Duplicating the key lists here is how the two screens
+ * would drift apart.
+ */
 function dashBudget(budget) {
-  var html = '<article><header><h3 style="margin:0;">Budget Status</h3></header>' +
-    '<div class="dash-budget-grid">';
+  var by = {};
+  (budget || []).forEach(function(cat) { by[cat.key] = cat; });
 
-  budget.forEach(function(cat) {
-    var pct = cat.allocated > 0 ? Math.round(cat.paid / cat.allocated * 100) : 0;
-    html += '<div class="dash-budget-item">' +
-      '<div class="dash-budget-item__header">' +
-        '<span>' + escapeHtml(cat.category) + '</span>' +
-        '<span class="muted">' + formatCurrency(cat.allocated) + '</span>' +
-      '</div>' +
-      '<div style="height:8px;background:var(--rule-2);border-radius:4px;overflow:hidden;margin-bottom:0.6rem;">' +
-        '<div style="height:100%;width:' + pct + '%;background:var(--fern);border-radius:4px;transition:width 0.3s;"></div>' +
-      '</div>' +
-      '<div class="dash-budget-item__detail">' +
-        '<span>Paid ' + formatCurrency(cat.paid) + '</span>' +
-        (cat.outstanding > 0
-          ? '<span style="color:var(--warn);">Owe ' + formatCurrency(cat.outstanding) + '</span>'
-          : '<span style="color:var(--sage);">Complete</span>') +
-      '</div>' +
-    '</div>';
+  function sum(keys) {
+    var out = { allocated: 0, paid: 0, outstanding: 0 };
+    keys.forEach(function(k) {
+      var c = by[k];
+      if (!c) return;
+      out.allocated += c.allocated;
+      out.paid += c.paid;
+      out.outstanding += c.outstanding;
+    });
+    return out;
+  }
+
+  function keysOf(rows) {
+    var keys = [];
+    rows.forEach(function(row) { keys = keys.concat(row.keys); });
+    return keys;
+  }
+
+  // Revenue, from each side. These OVERLAP by the owner pay draw — the company
+  // invoiced it and then paid it out — so they are never added together.
+  var businessRevenue = 0;
+  var soleTraderRevenue = 0;
+  (budget || []).forEach(function(cat) {
+    if (cat.isTransfer) return;
+    if (cat.scope === 'legacy') soleTraderRevenue += cat.allocated;
+    else businessRevenue += cat.allocated;
   });
+  var draw = by.owner_pay || { allocated: 0, paid: 0, outstanding: 0 };
+  var personalRevenue = draw.allocated + soleTraderRevenue;
 
-  html += '</div></article>';
+  var bizOwed = sum(keysOf(BIZ_OBLIGATIONS));
+  var perOwed = sum(keysOf(PERSONAL_OBLIGATIONS));
+
+  var html = '<article><header><h3 style="margin:0;">Budget</h3></header>';
+
+  html += dashBudgetGroup('Total revenue', 'two views of the same money — not added together', [
+    { label: 'Business', amount: businessRevenue, detail: 'invoiced by the company' },
+    { label: 'Personal', amount: personalRevenue,
+      detail: 'owner pay ' + formatCurrency(draw.allocated) +
+        ' · sole trader ' + formatCurrency(soleTraderRevenue) }
+  ]);
+
+  html += dashBudgetGroup('Total obligations',
+    formatCurrency(bizOwed.outstanding + perOwed.outstanding) + ' still to pay', [
+      { label: 'Business', amount: bizOwed.outstanding,
+        detail: 'tax, GST, ACC · paid ' + formatCurrency(bizOwed.paid) },
+      { label: 'Personal', amount: perOwed.outstanding,
+        detail: 'tax, ACC · paid ' + formatCurrency(perOwed.paid) }
+    ]);
+
+  // Spend, save, invest, donate — the order asked for, keyed on the registry key
+  // rather than the display label so renaming a label cannot silently zero a box.
+  var DASH_ALLOCATION_ORDER = ['per_spend', 'per_save', 'per_invest', 'per_donate'];
+  var allocationBoxes = DASH_ALLOCATION_ORDER.map(function(key) {
+    var row = PERSONAL_ALLOCATIONS.find(function(r) { return r.keys[0] === key; });
+    if (!row) return null;
+    var figures = sum(row.keys);
+    var detail;
+    if (figures.allocated === 0) detail = 'nothing allocated yet';
+    else if (figures.outstanding > 0) detail = formatCurrency(figures.outstanding) + ' still to action';
+    else detail = 'all actioned';
+    return { label: row.label, amount: figures.allocated, detail: detail };
+  }).filter(Boolean);
+  html += dashBudgetGroup('Personal allocations', '', allocationBoxes);
+
+  html += '</article>';
   return html;
+}
+
+function dashBudgetGroup(title, note, boxes) {
+  return '<h4 class="dash-budget-group">' + escapeHtml(title) +
+      (note ? ' <span class="muted small">' + escapeHtml(note) + '</span>' : '') +
+    '</h4>' +
+    '<div class="dash-budget-grid">' +
+      boxes.map(function(box) {
+        return '<div class="dash-budget-item">' +
+          '<div class="dash-budget-item__header">' +
+            '<span>' + escapeHtml(box.label) + '</span>' +
+            '<span class="dash-budget-item__amount">' + formatCurrency(box.amount || 0) + '</span>' +
+          '</div>' +
+          '<div class="dash-budget-item__detail"><span>' + escapeHtml(box.detail || '') + '</span></div>' +
+        '</div>';
+      }).join('') +
+    '</div>';
 }
 </script>

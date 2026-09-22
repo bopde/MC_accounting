@@ -27,46 +27,101 @@ function allocateBudgetFromClient(params) {
 }
 
 /**
+ * Preview an allocation from client. Returns what allocateBudget would write.
+ * @param {string} params - "invoiceId|ruleId"
+ */
+function previewAllocationFromClient(params) {
+  var parts = String(params).split('|');
+  if (parts.length < 2) throw new Error('Invalid parameters');
+  return previewAllocation(parts[0], parts[1]);
+}
+
+/**
  * Update allocation status from client.
- * @param {string} params - "allocationId|newStatus|transferDate"
+ * @param {string} params - "allocationId|newStatus|transferDate|notes"
  */
 function updateAllocationStatusFromClient(params) {
   var parts = String(params).split('|');
   if (parts.length < 2) throw new Error('Invalid parameters');
-  return updateAllocationStatus(parts[0], parts[1], parts[2] || null, parts[3] || null);
+  // The note is free text and may itself contain '|' (e.g. "ASB 4471 | GST Q2"),
+  // so it takes everything after the third delimiter rather than one field.
+  var notes = parts.length > 3 ? parts.slice(3).join('|') : '';
+  return updateAllocationStatus(parts[0], parts[1], parts[2] || null, notes || null);
+}
+
+/**
+ * Record a payment against one or more budget categories.
+ *
+ * @param {string} params - "categoryKeys|amount|paymentDate|dateFrom|dateTo|notes"
+ *
+ * The note comes last and takes everything after the fifth delimiter, because
+ * free text may itself contain '|' (e.g. "ASB 4471 | GST Q2").
+ */
+function payBudgetCategoriesFromClient(params) {
+  var parts = String(params).split('|');
+  if (parts.length < 3) throw new Error('Invalid parameters');
+  var notes = parts.length > 5 ? parts.slice(5).join('|') : '';
+  return payBudgetCategories(parts[0], parts[1], parts[2] || null, notes || null, {
+    dateFrom: parts[3] || '',
+    dateTo: parts[4] || ''
+  });
+}
+
+/**
+ * Undo a recorded payment, putting back what it took from each allocation.
+ * @param {string} paymentId
+ */
+function undoBudgetPaymentFromClient(paymentId) {
+  return undoBudgetPayment(String(paymentId));
+}
+
+/**
+ * Remove an invoice's budget allocations so it can be re-allocated or voided.
+ * @param {string} invoiceId
+ */
+function deallocateInvoiceFromClient(invoiceId) {
+  return deallocateInvoice(String(invoiceId));
 }
 
 /**
  * Toggle active status of a reference entity (Business, WorkCode, Account).
  * @param {string} params - "sheetName|rowIndex|active"
  */
+/**
+ * Activate or deactivate a reference entity, addressed by its ID.
+ *
+ * @param {string} params - "sheetName|entityId|active"
+ *
+ * Addressed by ID, not by row index: the row index the client renders with is a
+ * snapshot, so inserting or deleting a row in the spreadsheet afterwards made
+ * Deactivate silently hit whichever record had moved into that position. The row
+ * is re-resolved here, under the lock, every time.
+ */
 function toggleEntityFromClient(params) {
   var ALLOWED = ['Businesses', 'WorkCodes', 'Accounts', 'BudgetRules'];
-  var parts = params.split('|');
+  var parts = String(params).split('|');
   var sheetName = parts[0];
-  var rowIndex = parseInt(parts[1], 10);
+  var entityId = parts[1];
   var active = parts[2] === 'true';
 
   if (ALLOWED.indexOf(sheetName) === -1) {
     throw new Error('Access denied: cannot toggle ' + sheetName);
   }
+  if (!entityId) throw new Error('Missing entity id');
 
-  if (isNaN(rowIndex) || rowIndex < 2) {
-    throw new Error('Invalid row index');
-  }
+  return withScriptLock(function() {
+    var entity = findById(sheetName, entityId);
+    if (!entity) throw new Error('Not found in ' + sheetName + ': ' + entityId);
 
-  var ss = getSpreadsheet();
-  var sheet = ss.getSheetByName(sheetName);
-  var headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
-  var row = sheet.getRange(rowIndex, 1, 1, headers.length).getValues()[0];
+    if (!Object.prototype.hasOwnProperty.call(entity, 'active')) {
+      throw new Error('No active column in ' + sheetName +
+        '. Run setupSheets() from the Apps Script editor to add it.');
+    }
 
-  // Find the 'active' column
-  var activeCol = headers.indexOf('active');
-  if (activeCol === -1) throw new Error('No active column in ' + sheetName);
-
-  row[activeCol] = active;
-  sheet.getRange(rowIndex, 1, 1, row.length).setValues([row]);
-  return { success: true };
+    entity.active = active;
+    updateRow(sheetName, entity._rowIndex, entity);
+    return { success: true };
+  });
 }
 
 /**

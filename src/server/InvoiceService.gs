@@ -11,21 +11,50 @@ function getUninvoicedItemsInternal(businessId, dateFrom, dateTo, contractId) {
   var toStr = dateOnly(dateTo);
   var conIdStr = contractId ? String(contractId) : '';
 
+  var contract = conIdStr ? findById('Contracts', conIdStr) : null;
+  var conFrom = contract ? dateOnly(contract.date_from) : '';
+  var conTo = contract ? dateOnly(contract.date_to) : '';
+
+  /**
+   * A row with a contract must match the selected one. A row with NO contract
+   * counts towards it when the date falls inside the contract's period —
+   * matching how the dashboard already attributes unassigned work
+   * (DashboardService.contractProgress). Strict matching used to drop every
+   * entry logged before contracts existed, or left as "None".
+   */
+  function matchesContract(row, d) {
+    if (!conIdStr) return true;
+    var rowContract = row.contract_id ? String(row.contract_id) : '';
+    if (rowContract) return idsMatch(rowContract, conIdStr);
+    if (!d) return false;
+    if (conFrom && d < conFrom) return false;
+    if (conTo && d > conTo) return false;
+    return true;
+  }
+
+  /** Each bound guarded separately: `d > ''` is true, so an unset dateTo
+   *  would otherwise exclude every row instead of leaving the range open. */
+  function inDateRange(d) {
+    if (!d) return false;
+    if (fromStr && d < fromStr) return false;
+    if (toStr && d > toStr) return false;
+    return true;
+  }
+
   var timeEntries = getAll('TimeEntries').filter(function(te) {
     var d = dateOnly(te.date);
     if (!idsMatch(te.business_id, businessId)) return false;
     if (te.invoice_id && te.invoice_id !== '') return false;
-    if (d < fromStr || d > toStr) return false;
-    if (conIdStr && !idsMatch(te.contract_id || '', conIdStr)) return false;
-    return true;
+    if (!inDateRange(d)) return false;
+    return matchesContract(te, d);
   });
 
   var expenses = getAll('Expenses').filter(function(exp) {
     var d = dateOnly(exp.date);
     if (!idsMatch(exp.business_id, businessId)) return false;
     if (exp.invoice_id && exp.invoice_id !== '') return false;
-    if (d < fromStr || d > toStr) return false;
-    return true;
+    if (!inDateRange(d)) return false;
+    return matchesContract(exp, d);
   });
 
   return { timeEntries: timeEntries, expenses: expenses };
@@ -42,6 +71,16 @@ function getUninvoicedItemsInternal(businessId, dateFrom, dateTo, contractId) {
  * @returns {Object} The created invoice
  */
 function generateInvoice(params) {
+  // One lock across select-items -> write invoice -> stamp items. Without it,
+  // two submissions for the same business and period both see the same
+  // uninvoiced entries and bill them twice, and both can compute the same
+  // invoice ID.
+  return withScriptLock(function() {
+    return generateInvoiceLocked(params);
+  }, 60000);
+}
+
+function generateInvoiceLocked(params) {
   var items = getUninvoicedItemsInternal(params.businessId, params.dateFrom, params.dateTo, params.contractId);
 
   if (items.timeEntries.length === 0 && items.expenses.length === 0) {
@@ -62,12 +101,12 @@ function generateInvoice(params) {
 
   // GST applies to time entries (services) only, not expenses
   var includeGst = isTruthy(params.includeGst);
-  var gstRate = includeGst ? (params.gstRate != null ? Number(params.gstRate) : 0.15) : 0;
+  var gstRate = includeGst ? requireGstRate(params.gstRate != null ? params.gstRate : 0.15) : 0;
   var gstAmount = includeGst ? Math.round(timeSubtotal * gstRate * 100) / 100 : 0;
   var total = subtotal + gstAmount;
 
   // Generate MMYY invoice ID based on the period end date
-  var invoiceId = generateInvoiceId(params.dateTo);
+  var invoiceId = generateInvoiceId(params.dateTo, params.businessId);
 
   var invoice = appendRow('Invoices', {
     invoice_id: invoiceId,
@@ -90,26 +129,52 @@ function generateInvoice(params) {
     line_descriptions: params.lineDescriptions ? JSON.stringify(params.lineDescriptions) : ''
   });
 
-  // Mark time entries as invoiced (force text format to preserve leading zeros)
   var ss = getSpreadsheet();
-  var teSheet = ss.getSheetByName('TimeEntries');
-  var teInvCol = getColumnIndex(teSheet, 'invoice_id');
-  items.timeEntries.forEach(function(te) {
-    var cell = teSheet.getRange(te._rowIndex, teInvCol);
-    cell.setNumberFormat('@');
-    cell.setValue(invoice.invoice_id);
-  });
-
-  // Mark expenses as invoiced
-  var expSheet = ss.getSheetByName('Expenses');
-  var expInvCol = getColumnIndex(expSheet, 'invoice_id');
-  items.expenses.forEach(function(exp) {
-    var cell = expSheet.getRange(exp._rowIndex, expInvCol);
-    cell.setNumberFormat('@');
-    cell.setValue(invoice.invoice_id);
-  });
+  stampInvoiceId(ss.getSheetByName('TimeEntries'), items.timeEntries, invoice.invoice_id);
+  stampInvoiceId(ss.getSheetByName('Expenses'), items.expenses, invoice.invoice_id);
 
   return invoice;
+}
+
+/**
+ * Stamp invoice_id onto a set of rows.
+ *
+ * Batched into contiguous runs rather than two API calls per row: a 150-entry
+ * invoice used to make 300 calls, which pushed past the client's 45s timeout —
+ * and since a timeout is not a cancellation, the user would retry and get a
+ * second invoice covering whatever the first pass had not yet stamped.
+ *
+ * Text format is forced to preserve leading zeros in IDs like '0526'.
+ */
+function stampInvoiceId(sheet, rows, invoiceId) {
+  if (!sheet || !rows || rows.length === 0) return;
+
+  var col = getColumnIndex(sheet, 'invoice_id');
+  var indexes = rows.map(function(r) { return r._rowIndex; })
+    .filter(function(i) { return !!i; })
+    .sort(function(a, b) { return a - b; });
+  if (indexes.length === 0) return;
+
+  var runStart = indexes[0];
+  var runEnd = indexes[0];
+
+  var flush = function() {
+    var height = runEnd - runStart + 1;
+    var values = [];
+    for (var i = 0; i < height; i++) values.push([invoiceId]);
+    sheet.getRange(runStart, col, height, 1).setNumberFormat('@').setValues(values);
+  };
+
+  for (var i = 1; i < indexes.length; i++) {
+    if (indexes[i] === runEnd + 1) {
+      runEnd = indexes[i];
+    } else {
+      flush();
+      runStart = indexes[i];
+      runEnd = indexes[i];
+    }
+  }
+  flush();
 }
 
 /**
@@ -136,17 +201,40 @@ function getInvoiceDetails(invoiceId) {
     try { lineDescs = JSON.parse(invoice.line_descriptions); } catch (e) {}
   }
 
-  // Group time entries by work code
+  // Group by work code AND rate.
+  //
+  // Grouping by code alone kept whichever rate happened to come last, so a
+  // code billed at two rates — a mid-period rate rise, or a discounted block —
+  // printed a line whose Hours x Rate did not equal its Amount. On a document
+  // that goes to a client, that is the kind of error they notice. A code
+  // billed at one rate still prints as one line, exactly as before.
   var codeGroups = {};
+  var groupOrder = [];
+  var codeFirstSeen = {};
   timeEntries.forEach(function(te) {
     var code = te.work_code;
-    if (!codeGroups[code]) {
-      codeGroups[code] = { code: code, description: lineDescs[code] || '', entries: [], totalHours: 0, totalAmount: 0, rate: 0 };
+    var rate = Number(te.rate) || 0;
+    var key = code + '\u0000' + rate;
+    if (codeFirstSeen[code] === undefined) codeFirstSeen[code] = groupOrder.length;
+    if (!codeGroups[key]) {
+      codeGroups[key] = {
+        code: code, rate: rate, description: lineDescs[code] || '',
+        totalHours: 0, totalAmount: 0
+      };
+      groupOrder.push(key);
     }
-    codeGroups[code].entries.push(te);
-    codeGroups[code].totalHours += Number(te.hours) || 0;
-    codeGroups[code].totalAmount += Number(te.line_total) || 0;
-    if (te.rate) codeGroups[code].rate = Number(te.rate);
+    codeGroups[key].totalHours += Number(te.hours) || 0;
+    codeGroups[key].totalAmount += Number(te.line_total) || 0;
+  });
+
+  // Codes in the order they were first billed, and within a code, cheapest
+  // rate first. Comparing only within a code and returning 0 across codes
+  // would be an inconsistent comparator, which Array.sort is free to resolve
+  // any way it likes — so a code's first-seen position orders the codes.
+  groupOrder.sort(function(a, b) {
+    var ga = codeGroups[a], gb = codeGroups[b];
+    if (ga.code !== gb.code) return codeFirstSeen[ga.code] - codeFirstSeen[gb.code];
+    return ga.rate - gb.rate;
   });
 
   // Get allocations if they exist
@@ -157,9 +245,12 @@ function getInvoiceDetails(invoiceId) {
   // Get "my details" for the invoice header
   var myDetails = getMyDetails();
 
-  var codeGroupList = Object.keys(codeGroups).map(function(k) {
+  var codeGroupList = groupOrder.map(function(k) {
     var g = codeGroups[k];
-    return { code: g.code, description: g.description, totalHours: g.totalHours, totalAmount: g.totalAmount, rate: g.rate };
+    return {
+      code: g.code, description: g.description,
+      totalHours: round2(g.totalHours), totalAmount: round2(g.totalAmount), rate: g.rate
+    };
   });
 
   var timeSubtotal = codeGroupList.reduce(function(s, g) { return s + g.totalAmount; }, 0);
@@ -182,28 +273,33 @@ function getInvoiceDetails(invoiceId) {
  * Update invoice status (draft -> sent -> paid).
  */
 function updateInvoiceStatus(invoiceId, newStatus) {
-  var validTransitions = {
-    draft: ['sent', 'void'],
-    sent: ['paid', 'void'],
-    paid: ['void'],
-    void: []
-  };
+  // Locked: the transition is checked against the status this read returned,
+  // and the row is addressed by the _rowIndex it came back with. Both go stale
+  // the moment anything else writes.
+  return withScriptLock(function() {
+    var validTransitions = {
+      draft: ['sent', 'void'],
+      sent: ['paid', 'void'],
+      paid: ['void'],
+      void: []
+    };
 
-  var invoice = findById('Invoices', invoiceId);
-  if (!invoice) throw new Error('Invoice not found: ' + invoiceId);
+    var invoice = findById('Invoices', invoiceId);
+    if (!invoice) throw new Error('Invoice not found: ' + invoiceId);
 
-  var allowed = validTransitions[invoice.status] || [];
-  if (allowed.indexOf(newStatus) === -1) {
-    throw new Error('Cannot change status from "' + invoice.status + '" to "' + newStatus + '".');
-  }
+    var allowed = validTransitions[invoice.status] || [];
+    if (allowed.indexOf(newStatus) === -1) {
+      throw new Error('Cannot change status from "' + invoice.status + '" to "' + newStatus + '".');
+    }
 
-  if (newStatus === 'void') {
-    return voidInvoice(invoice);
-  }
+    if (newStatus === 'void') {
+      return voidInvoice(invoice);
+    }
 
-  invoice.status = newStatus;
-  updateRow('Invoices', invoice._rowIndex, invoice);
-  return invoice;
+    invoice.status = newStatus;
+    updateRow('Invoices', invoice._rowIndex, invoice);
+    return invoice;
+  });
 }
 
 /**
@@ -211,43 +307,43 @@ function updateInvoiceStatus(invoiceId, newStatus) {
  * time entries and expenses so they can be re-invoiced.
  */
 function voidInvoice(invoice) {
-  var invIdStr = String(invoice.invoice_id);
-  var allocations = getAll('BudgetAllocations').filter(function(a) {
-    return idsMatch(a.invoice_id, invIdStr);
+  return withScriptLock(function() {
+    var invIdStr = String(invoice.invoice_id);
+    var allocations = getAll('BudgetAllocations').filter(function(a) {
+      return idsMatch(a.invoice_id, invIdStr);
+    });
+    if (allocations.length > 0) {
+      throw new Error('Cannot void — this invoice has budget allocations. ' +
+        'Remove the allocation first (Invoices > the invoice > Remove allocation), then void it.');
+    }
+
+    // Mark void FIRST. Unlinking is what frees the entries to be billed again,
+    // so if this run dies partway the safe half-state is a voided invoice with
+    // some entries still attached — annoying, and repaired by voiding again.
+    // The other order leaves entries loose while the invoice is still live,
+    // which bills the same work twice.
+    invoice.status = 'void';
+    updateRow('Invoices', invoice._rowIndex, invoice);
+
+    var ss = getSpreadsheet();
+
+    // Batched through stampInvoiceId: one call per contiguous run rather than
+    // one per row. A 150-entry invoice was 150 writes, which ran past the
+    // client's timeout — and a timeout is not a cancellation.
+    unlinkInvoiceRows(ss.getSheetByName('TimeEntries'), 'TimeEntries', invIdStr);
+    unlinkInvoiceRows(ss.getSheetByName('Expenses'), 'Expenses', invIdStr);
+
+    return invoice;
   });
-  if (allocations.length > 0) {
-    throw new Error('Cannot void — this invoice has budget allocations. Remove them first.');
-  }
+}
 
-  var ss = getSpreadsheet();
-
-  // Unlink time entries
-  var teSheet = ss.getSheetByName('TimeEntries');
-  if (teSheet) {
-    var teInvCol = getColumnIndex(teSheet, 'invoice_id');
-    var teAll = getAll('TimeEntries');
-    teAll.forEach(function(te) {
-      if (idsMatch(te.invoice_id, invIdStr)) {
-        teSheet.getRange(te._rowIndex, teInvCol).setValue('');
-      }
-    });
-  }
-
-  // Unlink expenses
-  var expSheet = ss.getSheetByName('Expenses');
-  if (expSheet) {
-    var expInvCol = getColumnIndex(expSheet, 'invoice_id');
-    var expAll = getAll('Expenses');
-    expAll.forEach(function(exp) {
-      if (idsMatch(exp.invoice_id, invIdStr)) {
-        expSheet.getRange(exp._rowIndex, expInvCol).setValue('');
-      }
-    });
-  }
-
-  invoice.status = 'void';
-  updateRow('Invoices', invoice._rowIndex, invoice);
-  return invoice;
+/** Blank invoice_id on every row of a sheet that points at this invoice. */
+function unlinkInvoiceRows(sheet, sheetName, invoiceId) {
+  if (!sheet) return;
+  var rows = getAll(sheetName).filter(function(r) {
+    return idsMatch(r.invoice_id, invoiceId);
+  });
+  stampInvoiceId(sheet, rows, '');
 }
 
 /**
@@ -258,8 +354,18 @@ function voidInvoice(invoice) {
  *   description, notes, include_gst, gst_rate
  */
 function updateInvoice(params) {
+  // Locked: the allocation guard below is only meaningful if nothing can
+  // allocate this invoice between the check and the write.
+  return withScriptLock(function() { return updateInvoiceLocked(params); });
+}
+
+function updateInvoiceLocked(params) {
   var invoice = findById('Invoices', params.invoice_id);
   if (!invoice) throw new Error('Invoice not found: ' + params.invoice_id);
+
+  if (params.created_date !== undefined && params.created_date !== '') {
+    params.created_date = requireDate(params.created_date, 'Invoice date');
+  }
 
   if (invoice.status === 'paid' || invoice.status === 'void') {
     throw new Error('Cannot edit a ' + invoice.status + ' invoice.');
@@ -267,6 +373,7 @@ function updateInvoice(params) {
 
   if (params.created_date !== undefined && params.created_date !== '') invoice.created_date = params.created_date;
   if (params.description !== undefined) invoice.description = params.description;
+  if (params.po_number !== undefined) invoice.po_number = String(params.po_number).trim();
   if (params.notes !== undefined) invoice.notes = params.notes;
   if (params.line_descriptions !== undefined) {
     invoice.line_descriptions = typeof params.line_descriptions === 'string'
@@ -280,7 +387,7 @@ function updateInvoice(params) {
     recalc = true;
   }
   if (params.gst_rate !== undefined && params.gst_rate !== '') {
-    invoice.gst_rate = Number(params.gst_rate) || 0;
+    invoice.gst_rate = requireGstRate(params.gst_rate);
     recalc = true;
   }
 
@@ -313,18 +420,28 @@ function updateInvoice(params) {
 }
 
 /**
+ * A GST rate is a FRACTION: 0.15, not 15.
+ *
+ * The form divides by 100 before sending, so a rate above 1 means something
+ * bypassed it — and an unguarded 15 would bill fifteen times the invoice as
+ * GST. Guarded here rather than trusting the input element's max attribute,
+ * which only applies to native form validation.
+ */
+function requireGstRate(value) {
+  var rate = Number(value);
+  if (isNaN(rate) || rate < 0 || rate > 1) {
+    throw new Error('GST rate must be between 0% and 100% (got ' + value +
+      '). Enter it as a percentage in the form — 15 for 15%.');
+  }
+  return rate;
+}
+
+/**
  * Get invoices with business name and currency.
  * Accepts params object with dateFrom/dateTo, or a year string for backwards compat.
  */
 function getInvoicesWithDetails(params) {
-  var invoices;
-  if (typeof params === 'object' && params !== null && params.dateFrom) {
-    invoices = getByDateRange('Invoices', 'created_date', params.dateFrom, params.dateTo);
-  } else if (params) {
-    invoices = getByYear('Invoices', 'created_date', params);
-  } else {
-    invoices = getAll('Invoices');
-  }
+  var invoices = getByDateParams('Invoices', 'created_date', params);
   var businesses = getAll('Businesses');
   var bizMap = {};
   businesses.forEach(function(b) { bizMap[normalizeId(b.business_id)] = b; });
@@ -338,40 +455,174 @@ function getInvoicesWithDetails(params) {
 }
 
 /**
- * Generate invoice ID in MMYY format based on the period end date.
- * E.g. dateTo of "2026-05-31" → "0526".
- * Subsequent invoices in the same month get a letter suffix: 0526a, 0526b, etc.
+ * Words that carry no identity, so they are skipped when deriving initials.
+ * "Ministry of Business and Employment" -> MBE, not MOBAE.
  */
-function generateInvoiceId(dateTo) {
-  var lock = LockService.getScriptLock();
-  lock.waitLock(10000);
-  try {
-    var parts = String(dateTo).split('-');
+var INVOICE_PREFIX_STOPWORDS = ['of', 'the', 'and', 'a', 'an', 'for', 'at',
+  'ltd', 'limited', 'inc', 'incorporated', 'llc', 'llp', 'plc', 'pty', 'co', 'nz'];
+
+var INVOICE_PREFIX_MAX = 3;
+var INVOICE_CODE_MAX = 6;
+
+/**
+ * Clean a prefix to the characters an invoice id may safely carry.
+ *
+ * Leading digits are dropped, which is not cosmetic: normalizeId() strips
+ * leading zeros from every id it compares (Sheets turns a bare '0526' into the
+ * number 526), so a prefix beginning with 0 makes ids alias each other —
+ * '0S0526' and 'S0526' both normalise to 'S0526', and '00526' collides with a
+ * legacy '0526'. findById would then return the wrong invoice, and voiding or
+ * allocating would hit the wrong record. Requiring a letter first removes the
+ * whole class.
+ */
+function normaliseInvoicePrefix(value) {
+  return String(value == null ? '' : value)
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, '')
+    .replace(/^[0-9]+/, '');
+}
+
+/**
+ * The invoice-ID prefix for a business: "Auckland Transport" -> "AT".
+ *
+ * An explicit invoice_code on the business always wins — needed when the
+ * initials read badly, or when two clients would otherwise share a prefix.
+ * Otherwise: one letter per significant word, or the first two letters when the
+ * name is a single word, capped at INVOICE_PREFIX_MAX characters. An explicit
+ * code may run to INVOICE_CODE_MAX.
+ *
+ * Returns '' when there is no usable name, which falls back to the old
+ * prefix-less MMYY id rather than failing the invoice.
+ */
+function businessInvoicePrefix(business) {
+  if (!business) return '';
+
+  var explicit = normaliseInvoicePrefix(business.invoice_code);
+  if (explicit) return explicit.slice(0, INVOICE_CODE_MAX);
+
+  var words = String(business.name || '').split(/[^A-Za-z0-9]+/).filter(Boolean);
+  if (words.length === 0) return '';
+
+  var significant = words.filter(function(w) {
+    if (INVOICE_PREFIX_STOPWORDS.indexOf(w.toLowerCase()) !== -1) return false;
+    // Drop one-letter fragments: splitting on punctuation turns "Bob's Bakery"
+    // into Bob / s / Bakery, and that stray 's' would give BSB instead of BB.
+    return w.length > 1;
+  });
+  // Unless dropping them left nothing — "H & M" is genuinely single letters.
+  if (significant.length === 0) {
+    significant = words.filter(function(w) {
+      return INVOICE_PREFIX_STOPWORDS.indexOf(w.toLowerCase()) === -1;
+    });
+  }
+  if (significant.length === 0) significant = words;
+
+  var raw = significant.length === 1
+    ? significant[0].slice(0, 2)
+    : significant.map(function(w) { return w.charAt(0); }).join('');
+
+  return normaliseInvoicePrefix(raw).slice(0, INVOICE_PREFIX_MAX);
+}
+
+/**
+ * Generate an invoice ID: business prefix + MMYY of the period end date.
+ * E.g. Auckland Transport for May 2026 -> "AT0526".
+ * Further invoices for the SAME business in the SAME month get a letter
+ * suffix: AT0526a, AT0526b, ...
+ *
+ * With no business (or an unusable name) the id falls back to bare MMYY, which
+ * is the format every invoice used before prefixes existed.
+ */
+function generateInvoiceId(dateTo, businessId) {
+  // Re-entrant: generateInvoice already holds the lock across the scan and the
+  // write, which is what stops two submissions computing the same ID. Taking
+  // and releasing a separate lock here would leave that window open.
+  return withScriptLock(function() {
+    // Normalise first: a Date object or a malformed string used to slice into
+    // nonsense, producing ids like "ATundefined" — or, when the value contained
+    // a bracket, an unmatched-paren error from the pattern built below.
+    var iso = dateOnly(dateTo);
+    if (!iso) {
+      throw new Error('Cannot generate an invoice number: "' + dateTo +
+        '" is not a valid period end date. Expected YYYY-MM-DD.');
+    }
+
+    var parts = iso.split('-');
     var mm = parts[1];
     var yy = parts[0].slice(-2);
     var base = mm + yy;
 
+    var business = businessId ? findById('Businesses', businessId) : null;
+    var prefix = businessInvoicePrefix(business);
+    var stem = prefix + base;
+
     var invoices = getAll('Invoices');
-    var baseNum = base.replace(/^0+/, '');
-    var pattern = new RegExp('^0*' + baseNum + '([a-z]*)$');
-    var maxSuffix = '';
-    var count = 0;
+
+    // Count prior invoices by BUSINESS AND MONTH, not by matching the id text.
+    // Matching text meant a renamed business restarted its sequence — "Acme"
+    // (AC0526) becoming "Acme Digital" produced a second unsuffixed invoice for
+    // the same client and month — and two clients sharing a prefix interleaved
+    // one sequence, giving each of them a gappy run.
+    //
+    // With no business we cannot scope it, so fall back to matching the bare
+    // MMYY text, which is what every pre-prefix invoice used. Only there is the
+    // stripped-leading-zero tolerance needed: Sheets stores '0526' as 526.
+    var priorCount;
+    if (businessId) {
+      priorCount = invoices.filter(function(inv) {
+        if (!idsMatch(inv.business_id, businessId)) return false;
+        var d = dateOnly(inv.date_to || inv.created_date);
+        return d.slice(0, 4) === parts[0] && d.slice(5, 7) === mm;
+      }).length;
+    } else {
+      var baseNum = base.replace(/^0+/, '');
+      var barePattern = new RegExp('^0*' + baseNum + '([a-z]*)$', 'i');
+      priorCount = invoices.filter(function(inv) {
+        return barePattern.test(String(inv.invoice_id));
+      }).length;
+    }
+
+    var taken = {};
+    var highest = '';
     invoices.forEach(function(inv) {
-      var m = pattern.exec(String(inv.invoice_id));
-      if (m) {
-        count++;
-        if (m[1] > maxSuffix) maxSuffix = m[1];
-      }
+      var id = String(inv.invoice_id).trim();
+      taken[id.toUpperCase()] = true;
+
+      // Highest suffix already issued under THIS stem. A number that has been
+      // used must never be reused, even if the invoice was later deleted — a
+      // client's records may still refer to it. So the sequence only ever moves
+      // forward, never fills a hole.
+      if (id.toUpperCase().indexOf(stem.toUpperCase()) !== 0) return;
+      var tail = id.slice(stem.length).toLowerCase();
+      if (!/^[a-z]*$/.test(tail)) return;
+      if (suffixIndex(tail) > suffixIndex(highest)) highest = tail;
     });
 
-    if (count === 0) return base;
+    // Position by count so a rename or a shared prefix cannot restart the
+    // sequence, but never at or below a suffix already used under this stem.
+    var start = priorCount === 0 ? 0 : Math.max(priorCount, suffixIndex(highest) + 1);
 
-    // Next suffix after the highest existing one
-    var nextChar = maxSuffix === '' ? 'a' : nextSuffix(maxSuffix);
-    return base + nextChar;
-  } finally {
-    lock.releaseLock();
+    var suffix = '';
+    while (suffixIndex(suffix) < start || taken[(stem + suffix).toUpperCase()]) {
+      suffix = suffix === '' ? 'a' : nextSuffix(suffix);
+    }
+
+    return stem + suffix;
+  });
+}
+
+/**
+ * Position of a suffix in the sequence: '' -> 0, a -> 1, z -> 26, aa -> 27.
+ * Bijective base-26, so suffixes compare as numbers rather than as strings —
+ * plain '>' puts 'aa' below 'z'.
+ */
+function suffixIndex(suffix) {
+  var n = 0;
+  var s = String(suffix || '');
+  for (var i = 0; i < s.length; i++) {
+    n = n * 26 + (s.charCodeAt(i) - 96);
   }
+  return n;
 }
 
 function nextSuffix(s) {

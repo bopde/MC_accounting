@@ -231,6 +231,13 @@
   td.number, th.number { text-align: right; font-variant-numeric: tabular-nums; }
   table tr.total-row { background: var(--cream); }
   table tr.total-row td { border-top: 2px solid var(--rule); }
+  /* Scope subheading inside an allocation table (Business / Personal) */
+  table tr.group-row { background: var(--cream); }
+  table tr.group-row td {
+    border-top: 1px solid var(--rule); font-size: 0.72rem;
+    text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted);
+  }
+  table tr.group-row:hover { background: var(--cream); }
 
   .data-table { width: 100%; min-width: 0; }
   .data-table--compact td, .data-table--compact th { padding: 0.35rem 0.55rem; font-size: 0.82rem; }
@@ -250,7 +257,7 @@
     letter-spacing: 0.08em;
   }
   .badge-draft, .badge-pending, .badge-allocated { background: var(--warn-bg); color: var(--warn); }
-  .badge-sent, .badge-transferred, .badge-info    { background: rgba(74,144,184,0.12); color: var(--tide); }
+  .badge-sent, .badge-transferred, .badge-info, .badge-part-paid { background: rgba(74,144,184,0.12); color: var(--tide); }
   .badge-paid, .badge-reconciled                   { background: var(--success-bg); color: var(--success); }
   .badge-void                                      { background: rgba(13,46,74,0.06); color: var(--muted); }
 
@@ -328,6 +335,56 @@
   .filters select, .filters input { margin-bottom: 0; min-height: 44px; }
   .filters button { width: auto; min-height: 44px; padding: 0.4rem 0.75rem; }
 
+  /* ---- Schema / error banner ---- */
+  .app-banner {
+    display: flex; gap: 1rem; align-items: flex-start; justify-content: space-between;
+    padding: 0.7rem 0.9rem; margin: 0.75rem 0; border-radius: 4px;
+    font-size: 0.85rem; line-height: 1.45;
+    background: var(--warn-bg); border-left: 3px solid var(--warn);
+  }
+  .app-banner hr { margin: 0.4rem 0; border: 0; border-top: 1px solid var(--rule-2); }
+  .app-banner code { font-size: 0.8rem; }
+  .app-banner button { flex: 0 0 auto; }
+
+  /* ---- Section and subsection totals on the Budget page ---- */
+  .section-total {
+    font-family: var(--font-display); font-weight: 300; color: var(--ocean);
+    font-size: 1.15rem; margin-left: 0.35rem;
+  }
+  .section-total--sm { font-size: 1rem; }
+  .sub-heading {
+    margin: 1rem 0 0.5rem; font-size: 0.92rem; font-weight: 500; color: var(--ocean);
+    display: flex; align-items: baseline; gap: 0.4rem; flex-wrap: wrap;
+  }
+
+  /* ---- Two-column box rows: business | personal ---- */
+  .pot-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin: 0.75rem 0 1.5rem; }
+  .pot-card { border: 1px solid var(--rule); border-radius: 4px; padding: 0.8rem 0.9rem; margin: 0; }
+  .pot-card__header {
+    display: flex; align-items: baseline; justify-content: space-between; gap: 0.75rem;
+    padding-bottom: 0.5rem; margin-bottom: 0.6rem; border-bottom: 1px solid var(--rule-2);
+  }
+  .pot-card__header h3, .pot-card__header h4 { margin: 0; font-size: 1.05rem; }
+  .pot-card__headline { display: flex; flex-direction: column; align-items: flex-end; }
+  .pot-card__amount {
+    font-family: var(--font-display); font-size: 1.3rem; font-weight: 300;
+    color: var(--ocean); line-height: 1.1;
+  }
+  .pot-card__table { margin: 0; }
+  .pot-card__table td { border-bottom: 1px solid var(--rule-2); }
+  .pot-card__table tbody tr:last-child td { border-bottom: 0; }
+
+  /* Pot chips in the shared action list */
+  .pot-tag {
+    display: inline-block; padding: 0.05rem 0.4rem; border-radius: 3px;
+    font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.06em; white-space: nowrap;
+  }
+  .pot-tag--business { background: var(--cream); border: 1px solid var(--sage); color: var(--ocean); }
+  .pot-tag--personal { background: var(--cream); border: 1px solid var(--rule); color: var(--ocean); }
+  .pot-tag--bridge, .pot-tag--legacy { background: transparent; border: 1px solid var(--rule-2); color: var(--muted); }
+
+  details.flow-group > summary { cursor: pointer; }
+
   /* ---- Money flow tiles ---- */
   .flow-overview {
     display: grid;
@@ -384,6 +441,8 @@
     grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr));
     gap: 0.75rem;
   }
+  /* Inside a half-width column the boxes stack rather than competing for width */
+  .flow-grid--stack { grid-template-columns: 1fr; }
 
   .mini-tile {
     background: var(--white);
@@ -403,6 +462,158 @@
   .mini-tile__bar { height: 4px; background: var(--rule-2); border-radius: 2px; margin-top: 0.3rem; overflow: hidden; }
   .mini-tile__bar-paid { height: 100%; background: var(--sage); transition: width 0.3s ease; }
   .mini-tile__split { display: flex; justify-content: space-between; font-size: 0.7rem; color: var(--muted); margin-top: 0.1rem; }
+
+  /* Single box on its own row, not stretched across the full width */
+  .flow-grid--single { grid-template-columns: minmax(0, 320px); }
+
+  /* ---- Payable tiles: a figure with the one action that settles it ---- */
+  .tile-with-action { display: flex; flex-direction: column; min-width: 0; }
+  .tile-with-action .mini-tile {
+    border-bottom-left-radius: 0;
+    border-bottom-right-radius: 0;
+    border-bottom: 0;
+  }
+  .tile-action {
+    background: var(--white);
+    border: 1px solid var(--rule);
+    border-top: 1px solid var(--rule-2);
+    border-radius: 0 0 4px 4px;
+    padding: 0.45rem 0.85rem 0.55rem;
+    display: flex;
+    justify-content: flex-end;
+  }
+  .tile-action button { margin: 0; }
+  .tile-action__done { font-size: 0.72rem; color: var(--success); font-weight: 500; }
+
+  /* ---- The money map ---- */
+  .money-map {
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    align-items: stretch;
+    gap: 0.75rem;
+    margin: 0 0 1.5rem;
+  }
+  .money-map__col {
+    background: var(--white);
+    border: 1px solid var(--rule);
+    border-radius: 4px;
+    padding: 0.85rem 0.95rem;
+    margin: 0;
+    min-width: 0;
+  }
+  .money-map__col--business  { border-top: 3px solid var(--ocean); }
+  .money-map__col--personal  { border-top: 3px solid var(--sage); }
+  .money-map__col h4 {
+    margin: 0 0 0.5rem;
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-family: var(--font-body);
+    font-weight: 600;
+    color: var(--muted);
+  }
+  .money-map__line {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    align-items: baseline;
+    column-gap: 0.5rem;
+    padding: 0.3rem 0;
+    border-bottom: 1px solid var(--rule-2);
+  }
+  .money-map__col .money-map__line:last-child { border-bottom: 0; }
+  .money-map__line-label { font-size: 0.8rem; }
+  .money-map__line-amount {
+    font-family: var(--font-display);
+    font-size: 1.1rem;
+    font-weight: 300;
+    color: var(--ocean);
+    white-space: nowrap;
+  }
+  .money-map__line-note { grid-column: 1 / -1; font-size: 0.68rem; color: var(--muted); }
+  .money-map__bridge {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.1rem;
+    padding: 0 0.5rem;
+    min-width: 7.5rem;
+    text-align: center;
+  }
+  .money-map__bridge-label {
+    font-size: 0.68rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+    font-weight: 600;
+  }
+  .money-map__bridge-amount {
+    font-family: var(--font-display);
+    font-size: 1.25rem;
+    font-weight: 300;
+    color: var(--tide);
+    white-space: nowrap;
+  }
+  .money-map__bridge-arrow { font-size: 1.4rem; color: var(--sky); line-height: 1; }
+  .money-map__bridge-note { font-size: 0.68rem; color: var(--muted); }
+
+  /* ---- The payment panel ---- */
+  .pay-host:empty { display: none; }
+  .pay-panel {
+    margin: 0 0 1rem;
+    padding: 0.9rem 1rem 0.75rem;
+    border: 1px solid var(--sky);
+    border-left: 3px solid var(--sky);
+    background: var(--white);
+  }
+  .pay-panel__header { margin-bottom: 0.6rem; }
+  .pay-panel__header h4 { margin: 0; font-size: 1.05rem; }
+  .pay-panel__fields {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(160px, 100%), 1fr));
+    gap: 0.6rem;
+  }
+  .pay-panel__fields label { font-size: 0.72rem; color: var(--muted); margin: 0; }
+  .pay-panel__fields input { margin-bottom: 0; }
+  .pay-panel__actions {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    flex-wrap: wrap;
+    margin-top: 0.7rem;
+  }
+  .pay-panel__spacer { flex: 1 1 auto; }
+  .pay-panel__note { margin: 0.5rem 0 0; }
+
+  /* ---- Pot action bar: the button for a figure already shown above ---- */
+  .pot-action {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+    background: var(--white);
+    border: 1px solid var(--rule);
+    border-radius: 4px;
+    padding: 0.55rem 0.85rem;
+    margin: -0.75rem 0 1rem;
+  }
+  .pot-action__label { font-size: 0.78rem; color: var(--muted); }
+  .pot-action button { margin: 0; }
+
+  .history-group > summary { list-style: none; cursor: pointer; padding: 0.3rem 0; }
+  .history-group > summary::-webkit-details-marker { display: none; }
+  /* Pico draws its own chevron on the far right; this section has one already */
+  .history-group > summary::after { display: none !important; }
+  .history-group > summary h3 { display: inline; }
+  .history-group > summary::before { content: '\25B8  '; color: var(--muted); }
+  .history-group[open] > summary::before { content: '\25BE  '; }
+
+  @media (max-width: 640px) {
+    .money-map { grid-template-columns: 1fr; }
+    .money-map__bridge { flex-direction: row; gap: 0.4rem; min-width: 0; padding: 0.2rem 0; }
+    .money-map__bridge-arrow { transform: rotate(90deg); }
+  }
 
   /* ---- Category blocks ---- */
   .category-list { display: flex; flex-direction: column; gap: 0.75rem; }
@@ -465,6 +676,8 @@
   }
   .preview-numbers > div { display: flex; flex-direction: column; }
   .preview-numbers strong { font-family: var(--font-display); font-size: 1.05rem; font-weight: 300; color: var(--ocean); }
+  /* Stage boundaries in the cascade: business income, Owner Pay, personal net */
+  .preview-numbers__key strong { font-weight: 500; border-bottom: 2px solid var(--sage); }
   .preview-totals {
     margin: 0.75rem 0; padding: 0.6rem 0.8rem;
     background: var(--cream); border-radius: 4px; font-size: 0.9rem;
@@ -606,10 +819,24 @@
   .revenue-chart { display: block; width: 100%; min-height: 120px; }
   .flow-tile--warn { border-left-color: var(--warn); }
 
+  .dash-budget-group {
+    margin: 0.9rem 0 0.4rem;
+    font-size: 0.72rem;
+    font-weight: 500;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    display: flex; align-items: baseline; gap: 0.4rem; flex-wrap: wrap;
+  }
+  .dash-budget-group .small { text-transform: none; letter-spacing: 0; }
   .dash-budget-grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(min(250px, 100%), 1fr));
     gap: 0.75rem;
+  }
+  .dash-budget-item__amount {
+    font-family: var(--font-display); font-weight: 300; font-size: 1.05rem;
+    color: var(--ocean); white-space: nowrap;
   }
   .dash-budget-item {
     padding: 0.6rem 0.75rem;
@@ -681,6 +908,7 @@
     .invoice-meta { text-align: left; }
     .flow-overview { grid-template-columns: 1fr; }
     .flow-grid { grid-template-columns: 1fr; }
+    .pot-grid { grid-template-columns: 1fr; }
     .dash-columns { grid-template-columns: 1fr; }
     .dash-budget-grid { grid-template-columns: 1fr; }
     table { font-size: 0.8rem; }
