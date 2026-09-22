@@ -172,7 +172,9 @@ function renderInvoiceDetail(data) {
           (my.email ? '<div>' + escapeHtml(my.email) + '</div>' : '') +
           (my.phone ? '<div>' + escapeHtml(my.phone) + '</div>' : '') +
           (my.address ? '<div>' + escapeHtml(my.address).replace(/\n/g, '<br>') + '</div>' : '') +
-          (my.tax_number ? '<div class="muted">Tax #: ' + escapeHtml(my.tax_number) + '</div>' : '') +
+          // Only the GST number belongs on an invoice. The IRD number is still
+          // held in Settings for reference, but printing it puts a tax
+          // identifier on a document that goes to clients for no reason.
           (my.gst_number ? '<div class="muted">GST #: ' + escapeHtml(my.gst_number) + '</div>' : '') +
         '</div>' +
         '<div class="party-right">' +
@@ -286,10 +288,36 @@ function renderInvoiceDetail(data) {
         '<td><span class="badge badge-' + escapeHtml(status) + '">' + escapeHtml(status) + '</span></td>' +
         '</tr>';
     });
-    html += '</tbody></table></div></section>';
+    html += '</tbody></table></div>' +
+      '<p class="muted small">Allocated money is settled under Budget &rarr; Money Flow. ' +
+      'Removing the allocation puts this invoice back on the Allocate tab, and is what ' +
+      'lets a paid invoice be voided.</p>' +
+      '<div class="form-actions">' +
+        '<button type="button" class="btn-small btn-subtle" onclick="removeAllocation(\'' +
+          jsAttr(inv.invoice_id) + '\')">Remove allocation</button>' +
+      '</div>' +
+    '</section>';
   }
 
   content.innerHTML = html;
+}
+
+/**
+ * Remove an invoice's budget allocations.
+ *
+ * Voiding an allocated invoice has always been refused with "remove them
+ * first", and until now there was no way to do that from the app at all.
+ */
+function removeAllocation(invoiceId) {
+  if (!confirm('Remove this invoice\'s budget allocations?\n\n' +
+    'The invoice goes back to the Allocate tab so it can be allocated again. ' +
+    'Refused if any payment has already settled part of it — undo those first.')) return;
+
+  serverCall('deallocateInvoiceFromClient', invoiceId).then(function(result) {
+    showToast('Removed ' + result.removed + ' allocation' + (result.removed === 1 ? '' : 's'));
+    App.invalidate(['budget', 'dashboard']);
+    viewInvoice(invoiceId);
+  }).catch(function(err) { showToast(err.message, 'error'); });
 }
 
 // --- Edit Invoice ---
@@ -315,6 +343,9 @@ function editInvoice(invoiceId) {
           '</label>' +
           '<label>Description' +
             '<input type="text" id="edit-inv-desc" value="' + escapeHtml(inv.description || '') + '">' +
+          '</label>' +
+          '<label>PO Number' +
+            '<input type="text" id="edit-inv-po" value="' + escapeHtml(inv.po_number || '') + '" placeholder="optional">' +
           '</label>' +
           '<label>Notes' +
             '<textarea id="edit-inv-notes" rows="3">' + escapeHtml(inv.notes || '') + '</textarea>' +
@@ -366,6 +397,7 @@ function submitInvoiceEdit(event, invoiceId) {
     invoice_id: invoiceId,
     created_date: document.getElementById('edit-inv-date').value,
     description: document.getElementById('edit-inv-desc').value,
+    po_number: document.getElementById('edit-inv-po').value,
     notes: document.getElementById('edit-inv-notes').value,
     include_gst: document.getElementById('edit-inv-gst').checked,
     gst_rate: Number(document.getElementById('edit-inv-gst-rate').value) / 100,
@@ -400,6 +432,7 @@ function renderCreateInvoice() {
       '<div class="form-row">' +
         '<label>Business ' + buildSelect('inv-business', businesses, 'business_id', 'name', { required: true }) + '</label>' +
         '<label>Contract <select id="inv-contract"><option value="">All (no filter)</option></select></label>' +
+        '<label>PO Number <input type="text" id="inv-po" placeholder="optional"></label>' +
       '</div>' +
       '<div class="form-row">' +
         '<label>From <input type="date" id="inv-from" required value="' + lastMonth.from + '"></label>' +
@@ -435,7 +468,33 @@ function renderCreateInvoice() {
         (c.po_number ? ' (PO: ' + escapeHtml(c.po_number) + ')' : '') + '</option>';
     });
     contractEl.innerHTML = html;
+    applyContractPoNumber();
   });
+
+  document.getElementById('inv-contract').addEventListener('change', applyContractPoNumber);
+}
+
+/**
+ * Fill the PO field from the selected contract.
+ *
+ * The field stays editable and what the user types wins — a PO can differ from
+ * the contract's, and invoices raised with no contract need one too. Only a
+ * value this function put there is replaced.
+ */
+function applyContractPoNumber() {
+  var poEl = document.getElementById('inv-po');
+  var contractEl = document.getElementById('inv-contract');
+  if (!poEl || !contractEl) return;
+
+  var typedByUser = poEl.value && poEl.value !== poEl.dataset.fromContract;
+  if (typedByUser) return;
+
+  var contract = contractEl.value
+    ? (AppCache.contracts || []).find(function(c) { return idsMatch(c.contract_id, contractEl.value); })
+    : null;
+  var po = contract ? (contract.po_number || '') : '';
+  poEl.value = po;
+  poEl.dataset.fromContract = po;
 }
 
 /**
@@ -604,7 +663,7 @@ function confirmCreateInvoice() {
   }
 
   var contractId = snap.contractId || '';
-  var contract = contractId ? (AppCache.contracts || []).find(function(c) { return idsMatch(c.contract_id, contractId); }) : null;
+  var poEl = document.getElementById('inv-po');
 
   var params = {
     businessId: snap.businessId,
@@ -616,7 +675,7 @@ function confirmCreateInvoice() {
     notes: document.getElementById('inv-notes').value,
     lineDescriptions: Object.keys(lineDescs).length > 0 ? lineDescs : undefined,
     contractId: contractId || undefined,
-    poNumber: contract ? contract.po_number : undefined
+    poNumber: poEl ? poEl.value.trim() : ''
   };
 
   if (!confirm('Create this invoice? Time entries and expenses will be marked as invoiced.')) return;

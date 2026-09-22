@@ -50,6 +50,40 @@ function updateAllocationStatusFromClient(params) {
 }
 
 /**
+ * Record a payment against one or more budget categories.
+ *
+ * @param {string} params - "categoryKeys|amount|paymentDate|dateFrom|dateTo|notes"
+ *
+ * The note comes last and takes everything after the fifth delimiter, because
+ * free text may itself contain '|' (e.g. "ASB 4471 | GST Q2").
+ */
+function payBudgetCategoriesFromClient(params) {
+  var parts = String(params).split('|');
+  if (parts.length < 3) throw new Error('Invalid parameters');
+  var notes = parts.length > 5 ? parts.slice(5).join('|') : '';
+  return payBudgetCategories(parts[0], parts[1], parts[2] || null, notes || null, {
+    dateFrom: parts[3] || '',
+    dateTo: parts[4] || ''
+  });
+}
+
+/**
+ * Undo a recorded payment, putting back what it took from each allocation.
+ * @param {string} paymentId
+ */
+function undoBudgetPaymentFromClient(paymentId) {
+  return undoBudgetPayment(String(paymentId));
+}
+
+/**
+ * Remove an invoice's budget allocations so it can be re-allocated or voided.
+ * @param {string} invoiceId
+ */
+function deallocateInvoiceFromClient(invoiceId) {
+  return deallocateInvoice(String(invoiceId));
+}
+
+/**
  * Toggle active status of a reference entity (Business, WorkCode, Account).
  * @param {string} params - "sheetName|rowIndex|active"
  */

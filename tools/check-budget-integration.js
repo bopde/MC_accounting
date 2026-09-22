@@ -58,12 +58,14 @@ const db = {
     { allocation_id: 'BA-001', invoice_id: '0425', category: 'Spend', category_key: '',
       scope: '', percentage: 0.7, amount: 111.11, status: 'allocated',
       transfer_date: '', notes: '', _rowIndex: 2 }
-  ]
+  ],
+  BudgetPayments: []
 };
 
 // --- Sheet layer stubs (mirroring SheetService.gs) ---
 
 let allocationSeq = 1;
+let paymentSeq = 0;
 
 Object.assign(app, {
   LockService: {
@@ -98,9 +100,17 @@ Object.assign(app, {
     if (name === 'BudgetAllocations') {
       data.allocation_id = 'BA-' + String(++allocationSeq).padStart(3, '0');
     }
+    if (name === 'BudgetPayments') {
+      data.payment_id = 'BP-' + String(++paymentSeq).padStart(3, '0');
+    }
     data._rowIndex = db[name].length + 2;
     db[name].push(Object.assign({}, data));
     return data;
+  },
+  // Mirrors Sheets: deleting a row shifts every row below it up one.
+  deleteRow: function(name, rowIndex) {
+    db[name] = db[name].filter(function(r) { return r._rowIndex !== rowIndex; });
+    db[name].forEach(function(r, i) { r._rowIndex = i + 2; });
   },
   updateRow: function(name, rowIndex, data) {
     const i = db[name].findIndex(function(r) { return r._rowIndex === rowIndex; });
@@ -297,7 +307,7 @@ assert(r2(naiveRevenue - totalRevenue) === r2(flow.bridge.allocated),
   'excluding transfers removes exactly the Owner Pay amount, got ' +
   r2(naiveRevenue - totalRevenue) + ' vs ' + r2(flow.bridge.allocated));
 
-// --- Settling ---
+// --- Settling one allocation outright ---
 
 console.log('\nSettling');
 const gstRow = written.find(function(w) { return w.category_key === 'biz_gst'; });
@@ -310,6 +320,155 @@ assert(r2(after.totals.paid) === 750, 'paid total is 750, got ' + after.totals.p
 app.updateAllocationStatus(gstRow.allocation_id, 'allocated');
 const undone = app.getBudgetSummary(RANGE);
 assert(r2(undone.accountHoldings.business) === businessExpected, 'undo restores business holdings');
+
+// --- Paying a bucket ---
+
+console.log('\nPaying a bucket');
+
+function bucket(sum, key) {
+  return catMap(sum)[key] || { allocated: 0, paid: 0, outstanding: 0, items: [] };
+}
+
+// Business tax is allocated at 1400 on this invoice. Pay part of it.
+const part = app.payBudgetCategories('biz_tax', 500, '2026-06-05', 'ASB 4471 | prov tax', RANGE);
+const afterPart = app.getBudgetSummary(RANGE);
+assert(part.amount === 500, 'the payment records what was asked for, got ' + part.amount);
+assert(r2(bucket(afterPart, 'biz_tax').paid) === 500,
+  'a part payment moves only what was paid, got ' + bucket(afterPart, 'biz_tax').paid);
+assert(r2(bucket(afterPart, 'biz_tax').outstanding) === 900,
+  'the rest stays outstanding, got ' + bucket(afterPart, 'biz_tax').outstanding);
+assert(bucket(afterPart, 'biz_tax').items[0].status === 'part-paid',
+  'a part-paid allocation says so, got ' + bucket(afterPart, 'biz_tax').items[0].status);
+assert(bucket(afterPart, 'biz_tax').items[0].transfer_date === '',
+  'a part-paid allocation has no settled date yet');
+assert(afterPart.payments.length === 1 && afterPart.payments[0].notes === 'ASB 4471 | prov tax',
+  'the payment appears in the history with its note intact');
+assert(afterPart.payments[0].allocations === 1, 'the payment records what it covered');
+
+// Then the remainder, so the bucket closes out.
+app.payBudgetCategories('biz_tax', 900, '2026-06-20', '', RANGE);
+const afterFull = app.getBudgetSummary(RANGE);
+assert(r2(bucket(afterFull, 'biz_tax').outstanding) === 0,
+  'paying the remainder clears the bucket, got ' + bucket(afterFull, 'biz_tax').outstanding);
+assert(bucket(afterFull, 'biz_tax').items[0].status === 'paid',
+  'the allocation is settled once it is fully covered');
+assert(bucket(afterFull, 'biz_tax').items[0].transfer_date === '2026-06-20',
+  'the settled date is the payment that closed it, got ' +
+  bucket(afterFull, 'biz_tax').items[0].transfer_date);
+
+let refused = '';
+try {
+  app.payBudgetCategories('biz_tax', 1, '2026-06-21', '', RANGE);
+} catch (e) { refused = e.message; }
+assert(/Nothing outstanding/.test(refused), 'paying a settled bucket is refused: ' + refused);
+
+refused = '';
+try {
+  app.payBudgetCategories('biz_acc', 500, '2026-06-21', '', RANGE);
+} catch (e) { refused = e.message; }
+assert(/more than is outstanding/.test(refused),
+  'overpaying is refused rather than silently capped: ' + refused);
+
+refused = '';
+try {
+  app.payBudgetCategories('biz_acc', 0, '2026-06-21', '', RANGE);
+} catch (e) { refused = e.message; }
+assert(/greater than zero/.test(refused), 'a zero payment is refused: ' + refused);
+
+refused = '';
+try {
+  app.payBudgetCategories('not_a_bucket', 10, '2026-06-21', '', RANGE);
+} catch (e) { refused = e.message; }
+assert(/Unknown budget category/.test(refused), 'an unknown category is refused: ' + refused);
+
+// A merged box: personal tax is per_tax on company invoices and legacy_tax on
+// sole-trader ones, and one payment settles across both.
+console.log('\nPaying a merged bucket');
+const perTaxOutstanding = r2(bucket(afterFull, 'per_tax').outstanding +
+  bucket(afterFull, 'legacy_tax').outstanding);
+const merged = app.payBudgetCategories(['per_tax', 'legacy_tax'], perTaxOutstanding,
+  '2026-06-22', '', RANGE);
+const afterMerged = app.getBudgetSummary(RANGE);
+assert(merged.amount === perTaxOutstanding,
+  'the full remaining amount is accepted, got ' + merged.amount);
+assert(r2(bucket(afterMerged, 'per_tax').outstanding) === 0,
+  'the company side is cleared');
+assert(merged.category === 'Personal Tax + Tax To Pay',
+  'the payment is labelled with every bucket it covers, got ' + merged.category);
+
+// --- Undoing a payment ---
+
+console.log('\nUndoing a payment');
+const toUndo = afterMerged.payments.find(function(p) { return p.payment_id === part.payment_id; });
+assert(!!toUndo, 'the part payment is still in the history');
+
+app.undoBudgetPayment(part.payment_id);
+const afterUndo = app.getBudgetSummary(RANGE);
+assert(r2(bucket(afterUndo, 'biz_tax').outstanding) === 500,
+  'undo puts back exactly what that payment took, got ' + bucket(afterUndo, 'biz_tax').outstanding);
+assert(r2(bucket(afterUndo, 'biz_tax').paid) === 900,
+  'the other payment against the same bucket is untouched, got ' + bucket(afterUndo, 'biz_tax').paid);
+assert(afterUndo.payments.every(function(p) { return p.payment_id !== part.payment_id; }),
+  'the undone payment leaves the history');
+assert(afterUndo.payments.length === 2, 'the remaining payments survive the row shift, got ' +
+  afterUndo.payments.length);
+
+refused = '';
+try {
+  app.undoBudgetPayment(part.payment_id);
+} catch (e) { refused = e.message; }
+assert(/Payment not found/.test(refused), 'undoing twice is refused: ' + refused);
+
+// --- A spreadsheet that has not been migrated ---
+
+console.log('\nUn-migrated spreadsheet');
+const savedPayments = db.BudgetPayments;
+delete db.BudgetPayments;
+const realGetAll = app.getAll;
+app.getAll = function(name) {
+  if (name === 'BudgetPayments') throw new Error('Sheet not found: BudgetPayments');
+  return realGetAll(name);
+};
+const accBefore = r2(bucket(app.getBudgetSummary(RANGE), 'biz_acc').outstanding);
+refused = '';
+try {
+  app.payBudgetCategories('biz_acc', 10, '2026-06-22', '', RANGE);
+} catch (e) { refused = e.message; }
+assert(/BudgetPayments sheet is missing/.test(refused),
+  'a payment is refused before anything is settled: ' + refused);
+assert(r2(bucket(app.getBudgetSummary(RANGE), 'biz_acc').outstanding) === accBefore,
+  'and the allocations were left exactly as they were');
+app.getAll = realGetAll;
+db.BudgetPayments = savedPayments;
+
+// --- The date filter bounds a payment ---
+
+console.log('\nDate range');
+const narrow = { dateFrom: '2026-05-01', dateTo: '2026-05-31' };
+refused = '';
+try {
+  // The legacy Spend row is on the April invoice, so it is out of this range.
+  app.payBudgetCategories('legacy_spend', 10, '2026-06-22', '', narrow);
+} catch (e) { refused = e.message; }
+assert(/Nothing outstanding/.test(refused),
+  'a payment cannot reach an invoice outside the range on screen: ' + refused);
+
+// --- Rows written before partial payments existed ---
+
+console.log('\nBack-compatibility');
+assert(app.allocationPaidAmount({ amount: 100, status: 'paid' }) === 100,
+  'a blank paid_amount on a paid row means paid in full');
+assert(app.allocationPaidAmount({ amount: 100, status: 'allocated' }) === 0,
+  'a blank paid_amount on an allocated row means nothing paid');
+assert(app.allocationPaidAmount({ amount: 100, status: 'allocated', paid_amount: '' }) === 0,
+  'an empty string reads as blank, not as zero-by-Number');
+assert(app.allocationPaidAmount({ amount: 100, status: 'allocated', paid_amount: 250 }) === 100,
+  'a stray figure can never make a bucket look over-paid');
+assert(app.allocationPaidAmount({ amount: 100, status: 'allocated', paid_amount: -5 }) === 0,
+  'a negative figure reads as nothing paid');
+assert(app.parseCoveredAllocations('BA-002:252;BA-003:18').length === 2,
+  'a coverage string round-trips');
+assert(app.parseCoveredAllocations('').length === 0, 'an empty coverage string is no allocations');
 
 console.log('\n' + passes + ' passed, ' + failures + ' failed');
 process.exit(failures > 0 ? 1 : 0);

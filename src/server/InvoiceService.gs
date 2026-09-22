@@ -101,7 +101,7 @@ function generateInvoiceLocked(params) {
 
   // GST applies to time entries (services) only, not expenses
   var includeGst = isTruthy(params.includeGst);
-  var gstRate = includeGst ? (params.gstRate != null ? Number(params.gstRate) : 0.15) : 0;
+  var gstRate = includeGst ? requireGstRate(params.gstRate != null ? params.gstRate : 0.15) : 0;
   var gstAmount = includeGst ? Math.round(timeSubtotal * gstRate * 100) / 100 : 0;
   var total = subtotal + gstAmount;
 
@@ -201,17 +201,40 @@ function getInvoiceDetails(invoiceId) {
     try { lineDescs = JSON.parse(invoice.line_descriptions); } catch (e) {}
   }
 
-  // Group time entries by work code
+  // Group by work code AND rate.
+  //
+  // Grouping by code alone kept whichever rate happened to come last, so a
+  // code billed at two rates — a mid-period rate rise, or a discounted block —
+  // printed a line whose Hours x Rate did not equal its Amount. On a document
+  // that goes to a client, that is the kind of error they notice. A code
+  // billed at one rate still prints as one line, exactly as before.
   var codeGroups = {};
+  var groupOrder = [];
+  var codeFirstSeen = {};
   timeEntries.forEach(function(te) {
     var code = te.work_code;
-    if (!codeGroups[code]) {
-      codeGroups[code] = { code: code, description: lineDescs[code] || '', entries: [], totalHours: 0, totalAmount: 0, rate: 0 };
+    var rate = Number(te.rate) || 0;
+    var key = code + '\u0000' + rate;
+    if (codeFirstSeen[code] === undefined) codeFirstSeen[code] = groupOrder.length;
+    if (!codeGroups[key]) {
+      codeGroups[key] = {
+        code: code, rate: rate, description: lineDescs[code] || '',
+        totalHours: 0, totalAmount: 0
+      };
+      groupOrder.push(key);
     }
-    codeGroups[code].entries.push(te);
-    codeGroups[code].totalHours += Number(te.hours) || 0;
-    codeGroups[code].totalAmount += Number(te.line_total) || 0;
-    if (te.rate) codeGroups[code].rate = Number(te.rate);
+    codeGroups[key].totalHours += Number(te.hours) || 0;
+    codeGroups[key].totalAmount += Number(te.line_total) || 0;
+  });
+
+  // Codes in the order they were first billed, and within a code, cheapest
+  // rate first. Comparing only within a code and returning 0 across codes
+  // would be an inconsistent comparator, which Array.sort is free to resolve
+  // any way it likes — so a code's first-seen position orders the codes.
+  groupOrder.sort(function(a, b) {
+    var ga = codeGroups[a], gb = codeGroups[b];
+    if (ga.code !== gb.code) return codeFirstSeen[ga.code] - codeFirstSeen[gb.code];
+    return ga.rate - gb.rate;
   });
 
   // Get allocations if they exist
@@ -222,9 +245,12 @@ function getInvoiceDetails(invoiceId) {
   // Get "my details" for the invoice header
   var myDetails = getMyDetails();
 
-  var codeGroupList = Object.keys(codeGroups).map(function(k) {
+  var codeGroupList = groupOrder.map(function(k) {
     var g = codeGroups[k];
-    return { code: g.code, description: g.description, totalHours: g.totalHours, totalAmount: g.totalAmount, rate: g.rate };
+    return {
+      code: g.code, description: g.description,
+      totalHours: round2(g.totalHours), totalAmount: round2(g.totalAmount), rate: g.rate
+    };
   });
 
   var timeSubtotal = codeGroupList.reduce(function(s, g) { return s + g.totalAmount; }, 0);
@@ -247,28 +273,33 @@ function getInvoiceDetails(invoiceId) {
  * Update invoice status (draft -> sent -> paid).
  */
 function updateInvoiceStatus(invoiceId, newStatus) {
-  var validTransitions = {
-    draft: ['sent', 'void'],
-    sent: ['paid', 'void'],
-    paid: ['void'],
-    void: []
-  };
+  // Locked: the transition is checked against the status this read returned,
+  // and the row is addressed by the _rowIndex it came back with. Both go stale
+  // the moment anything else writes.
+  return withScriptLock(function() {
+    var validTransitions = {
+      draft: ['sent', 'void'],
+      sent: ['paid', 'void'],
+      paid: ['void'],
+      void: []
+    };
 
-  var invoice = findById('Invoices', invoiceId);
-  if (!invoice) throw new Error('Invoice not found: ' + invoiceId);
+    var invoice = findById('Invoices', invoiceId);
+    if (!invoice) throw new Error('Invoice not found: ' + invoiceId);
 
-  var allowed = validTransitions[invoice.status] || [];
-  if (allowed.indexOf(newStatus) === -1) {
-    throw new Error('Cannot change status from "' + invoice.status + '" to "' + newStatus + '".');
-  }
+    var allowed = validTransitions[invoice.status] || [];
+    if (allowed.indexOf(newStatus) === -1) {
+      throw new Error('Cannot change status from "' + invoice.status + '" to "' + newStatus + '".');
+    }
 
-  if (newStatus === 'void') {
-    return voidInvoice(invoice);
-  }
+    if (newStatus === 'void') {
+      return voidInvoice(invoice);
+    }
 
-  invoice.status = newStatus;
-  updateRow('Invoices', invoice._rowIndex, invoice);
-  return invoice;
+    invoice.status = newStatus;
+    updateRow('Invoices', invoice._rowIndex, invoice);
+    return invoice;
+  });
 }
 
 /**
@@ -276,43 +307,43 @@ function updateInvoiceStatus(invoiceId, newStatus) {
  * time entries and expenses so they can be re-invoiced.
  */
 function voidInvoice(invoice) {
-  var invIdStr = String(invoice.invoice_id);
-  var allocations = getAll('BudgetAllocations').filter(function(a) {
-    return idsMatch(a.invoice_id, invIdStr);
+  return withScriptLock(function() {
+    var invIdStr = String(invoice.invoice_id);
+    var allocations = getAll('BudgetAllocations').filter(function(a) {
+      return idsMatch(a.invoice_id, invIdStr);
+    });
+    if (allocations.length > 0) {
+      throw new Error('Cannot void — this invoice has budget allocations. ' +
+        'Remove the allocation first (Invoices > the invoice > Remove allocation), then void it.');
+    }
+
+    // Mark void FIRST. Unlinking is what frees the entries to be billed again,
+    // so if this run dies partway the safe half-state is a voided invoice with
+    // some entries still attached — annoying, and repaired by voiding again.
+    // The other order leaves entries loose while the invoice is still live,
+    // which bills the same work twice.
+    invoice.status = 'void';
+    updateRow('Invoices', invoice._rowIndex, invoice);
+
+    var ss = getSpreadsheet();
+
+    // Batched through stampInvoiceId: one call per contiguous run rather than
+    // one per row. A 150-entry invoice was 150 writes, which ran past the
+    // client's timeout — and a timeout is not a cancellation.
+    unlinkInvoiceRows(ss.getSheetByName('TimeEntries'), 'TimeEntries', invIdStr);
+    unlinkInvoiceRows(ss.getSheetByName('Expenses'), 'Expenses', invIdStr);
+
+    return invoice;
   });
-  if (allocations.length > 0) {
-    throw new Error('Cannot void — this invoice has budget allocations. Remove them first.');
-  }
+}
 
-  var ss = getSpreadsheet();
-
-  // Unlink time entries
-  var teSheet = ss.getSheetByName('TimeEntries');
-  if (teSheet) {
-    var teInvCol = getColumnIndex(teSheet, 'invoice_id');
-    var teAll = getAll('TimeEntries');
-    teAll.forEach(function(te) {
-      if (idsMatch(te.invoice_id, invIdStr)) {
-        teSheet.getRange(te._rowIndex, teInvCol).setValue('');
-      }
-    });
-  }
-
-  // Unlink expenses
-  var expSheet = ss.getSheetByName('Expenses');
-  if (expSheet) {
-    var expInvCol = getColumnIndex(expSheet, 'invoice_id');
-    var expAll = getAll('Expenses');
-    expAll.forEach(function(exp) {
-      if (idsMatch(exp.invoice_id, invIdStr)) {
-        expSheet.getRange(exp._rowIndex, expInvCol).setValue('');
-      }
-    });
-  }
-
-  invoice.status = 'void';
-  updateRow('Invoices', invoice._rowIndex, invoice);
-  return invoice;
+/** Blank invoice_id on every row of a sheet that points at this invoice. */
+function unlinkInvoiceRows(sheet, sheetName, invoiceId) {
+  if (!sheet) return;
+  var rows = getAll(sheetName).filter(function(r) {
+    return idsMatch(r.invoice_id, invoiceId);
+  });
+  stampInvoiceId(sheet, rows, '');
 }
 
 /**
@@ -323,8 +354,18 @@ function voidInvoice(invoice) {
  *   description, notes, include_gst, gst_rate
  */
 function updateInvoice(params) {
+  // Locked: the allocation guard below is only meaningful if nothing can
+  // allocate this invoice between the check and the write.
+  return withScriptLock(function() { return updateInvoiceLocked(params); });
+}
+
+function updateInvoiceLocked(params) {
   var invoice = findById('Invoices', params.invoice_id);
   if (!invoice) throw new Error('Invoice not found: ' + params.invoice_id);
+
+  if (params.created_date !== undefined && params.created_date !== '') {
+    params.created_date = requireDate(params.created_date, 'Invoice date');
+  }
 
   if (invoice.status === 'paid' || invoice.status === 'void') {
     throw new Error('Cannot edit a ' + invoice.status + ' invoice.');
@@ -332,6 +373,7 @@ function updateInvoice(params) {
 
   if (params.created_date !== undefined && params.created_date !== '') invoice.created_date = params.created_date;
   if (params.description !== undefined) invoice.description = params.description;
+  if (params.po_number !== undefined) invoice.po_number = String(params.po_number).trim();
   if (params.notes !== undefined) invoice.notes = params.notes;
   if (params.line_descriptions !== undefined) {
     invoice.line_descriptions = typeof params.line_descriptions === 'string'
@@ -345,7 +387,7 @@ function updateInvoice(params) {
     recalc = true;
   }
   if (params.gst_rate !== undefined && params.gst_rate !== '') {
-    invoice.gst_rate = Number(params.gst_rate) || 0;
+    invoice.gst_rate = requireGstRate(params.gst_rate);
     recalc = true;
   }
 
@@ -375,6 +417,23 @@ function updateInvoice(params) {
 
   updateRow('Invoices', invoice._rowIndex, invoice);
   return invoice;
+}
+
+/**
+ * A GST rate is a FRACTION: 0.15, not 15.
+ *
+ * The form divides by 100 before sending, so a rate above 1 means something
+ * bypassed it — and an unguarded 15 would bill fifteen times the invoice as
+ * GST. Guarded here rather than trusting the input element's max attribute,
+ * which only applies to native form validation.
+ */
+function requireGstRate(value) {
+  var rate = Number(value);
+  if (isNaN(rate) || rate < 0 || rate > 1) {
+    throw new Error('GST rate must be between 0% and 100% (got ' + value +
+      '). Enter it as a percentage in the form — 15 for 15%.');
+  }
+  return rate;
 }
 
 /**

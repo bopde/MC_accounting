@@ -495,5 +495,91 @@ check('a missing id is refused', function() {
   throws(function() { app.toggleEntityFromClient('Businesses||false'); }, 'Missing entity id');
 });
 
+// --- migrateAllocationPaidAmounts ---
+
+section('Pre-payment allocations are backfilled, not rewritten');
+
+const PAID_HEADERS = ['allocation_id', 'invoice_id', 'category', 'category_key', 'scope',
+  'percentage', 'amount', 'status', 'paid_amount', 'transfer_date', 'notes'];
+
+function withPaidAmounts(rows) {
+  app.__ss = makeSpreadsheet({
+    BudgetAllocations: makeSheet('BudgetAllocations', PAID_HEADERS, rows)
+  });
+  return app.__ss.getSheetByName('BudgetAllocations');
+}
+
+check('status decides the backfill, and only blank cells are touched', function() {
+  const sheet = withPaidAmounts([
+    ['BA-001', '0526', 'GST', 'biz_gst', 'business', '', 750, 'paid', '', '2026-06-02', ''],
+    ['BA-002', '0526', 'Business Tax', 'biz_tax', 'business', '', 1400, 'allocated', '', '', ''],
+    ['BA-003', '0526', 'Reserve', 'biz_reserve', 'business', '', 500, 'allocated', 200, '', '']
+  ]);
+  const filled = app.migrateAllocationPaidAmounts();
+  eq(filled, 2, 'only the two blank rows counted');
+
+  const paid = {};
+  sheet._grid.slice(1).forEach(function(r) { paid[r[0]] = r[8]; });
+  eq(paid['BA-001'], 750, 'a paid row was paid in full');
+  eq(paid['BA-002'], 0, 'an allocated row was not paid at all');
+  eq(paid['BA-003'], 200, 'an existing part payment is left exactly as it was');
+});
+
+check('running it twice changes nothing', function() {
+  const sheet = withPaidAmounts([
+    ['BA-001', '0526', 'GST', 'biz_gst', 'business', '', 750, 'paid', '', '2026-06-02', '']
+  ]);
+  app.migrateAllocationPaidAmounts();
+  eq(app.migrateAllocationPaidAmounts(), 0, 'nothing left to fill');
+  eq(sheet._grid[1][8], 750, 'and the figure is unchanged');
+});
+
+check('a spreadsheet without the column is left alone rather than crashing', function() {
+  app.__ss = makeSpreadsheet({
+    BudgetAllocations: makeSheet('BudgetAllocations', ALLOC_HEADERS, [
+      allocRow('BA-001', '0526', 'GST', 750)
+    ])
+  });
+  eq(app.migrateAllocationPaidAmounts(), 0, 'reports nothing filled');
+});
+
+// --- Every declared sheet is wired up ---
+
+section('A new sheet is declared everywhere it has to be');
+
+check('every sheet in the schema can generate an id', function() {
+  const schemas = app.sheetSchemas();
+  // MyDetails is a key/value sheet with no id column, and Invoices is numbered
+  // by generateInvoiceId (AT0526) rather than the sequential prefix scheme.
+  const exempt = ['MyDetails', 'Invoices'];
+  const missing = Object.keys(schemas).filter(function(name) {
+    return exempt.indexOf(name) === -1 && !app.ID_PREFIXES[name];
+  });
+  eq(missing.join(','), '', 'sheets with no ID prefix');
+});
+
+check('payments are declared with the columns the service writes', function() {
+  const columns = app.sheetSchemas().BudgetPayments || [];
+  ['payment_id', 'payment_date', 'category_key', 'category', 'scope',
+    'amount', 'notes', 'covered'].forEach(function(col) {
+    eq(columns.indexOf(col) !== -1, true, col + ' declared');
+  });
+});
+
+check('a payment write against an un-migrated sheet throws rather than dropping fields', function() {
+  app.__ss = makeSpreadsheet({
+    // The sheet as it would be if someone created it by hand, without `covered`.
+    BudgetPayments: makeSheet('BudgetPayments',
+      ['payment_id', 'payment_date', 'category', 'amount'], [])
+  });
+  throws(function() {
+    app.appendRow('BudgetPayments', {
+      payment_date: '2026-06-05', category_key: 'biz_tax', category: 'Business Tax',
+      scope: 'business', amount: 500, notes: '', covered: 'BA-002:500',
+      created_date: '2026-06-05'
+    });
+  }, 'covered');
+});
+
 console.log('\n' + passes + ' passed, ' + failures + ' failed');
 process.exit(failures > 0 ? 1 : 0);

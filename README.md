@@ -32,7 +32,8 @@ A finance management web app built entirely on Google Apps Script with Google Sh
 ### 2. Invoices
 - Generate invoices from uninvoiced time entries and expenses for a business and date range.
 - Optional GST at a configurable rate (default 15%). Record tax already withheld by the payer.
-- Print-friendly invoice view with your details ("From"), client details ("Bill To"), itemised services grouped by work code, and expenses listed individually.
+- Optional **PO number**, defaulting from the selected contract but editable, and settable on an existing invoice via Edit.
+- Print-friendly invoice view with your details ("From"), client details ("Bill To"), itemised services grouped by work code, and expenses listed individually. Only the **GST number** is printed — the IRD number is kept in Settings for reference but stays off documents that go to clients.
 - Status flow: draft -> sent -> paid -> void.
 - Entries are marked with the invoice ID once invoiced, preventing double-billing.
 
@@ -174,7 +175,7 @@ This is the **only external network request** made by the client. It loads the P
 
 ## Google Sheets Structure
 
-The spreadsheet has **11 tabs**, created automatically by `setupSheets()`:
+The spreadsheet has **12 tabs**, created automatically by `setupSheets()`:
 
 | Tab | Purpose | Key Fields |
 |-----|---------|-----------|
@@ -187,10 +188,15 @@ The spreadsheet has **11 tabs**, created automatically by `setupSheets()`:
 | **TimeEntries** | Logged work hours | entry_id, business_id, date, time_start, time_end, hours, description, work_code, rate, line_total, invoice_id, contract_id |
 | **Expenses** | Reimbursable expenses | expense_id, business_id, date, amount, description, work_code, invoice_id |
 | **Invoices** | Generated invoices | invoice_id, business_id, date_from, date_to, created_date, include_gst, gst_rate, time_subtotal, subtotal, gst_amount, total, status, budget_rule_id, contract_id, po_number, description, notes, line_descriptions |
-| **BudgetAllocations** | Per-invoice budget splits | allocation_id, invoice_id, category, category_key, scope, percentage, amount, status, transfer_date, notes |
+| **BudgetAllocations** | Per-invoice budget splits | allocation_id, invoice_id, category, category_key, scope, percentage, amount, status, paid_amount, transfer_date, notes |
+| **BudgetPayments** | Money actually moved, per payment | payment_id, payment_date, category_key, category, scope, amount, notes, covered, created_date |
 | **AccountSummaries** | Monthly account snapshots | summary_id, account_id, month, ending_balance, realised_gains, unrealised_gains, tax_paid, total_in, total_out, notes |
 
 `category_key` and `scope` are the identity columns on an allocation; `category` is the human-readable label.
+
+`paid_amount` is how much of an allocation has actually been paid, so a payment need not settle a whole allocation. `status` is kept in step (`paid` once `paid_amount` covers `amount`), and a **blank** `paid_amount` means the row predates partial payments — there, `status` is the whole truth.
+
+`BudgetPayments.covered` records exactly which allocations a payment was applied to and how much each got, as `BA-002:252;BA-003:18`, so a payment can be undone precisely rather than by re-deriving it.
 
 ### Migrations
 
@@ -200,7 +206,9 @@ Schema changes only take effect when `setupSheets()` runs. Until then, any write
 1. **Load-time banner**: `bootstrap()` returns `schemaWarnings` from `checkSchema()`, and the app shows a banner naming the sheets and columns that are missing.
 1. **Loud writes**: `assertKnownColumns` throws rather than dropping a field with no column.
 
-`setupSheets()` is idempotent and runs three steps: create missing sheets, append missing columns (`migrateColumns`), then repair allocation identity columns (`migrateBudgetAllocations`) and seed a company rule if none exists.
+`setupSheets()` is idempotent: create missing sheets, append missing columns (`migrateColumns`), repair allocation identity columns (`migrateBudgetAllocations`), backfill `paid_amount` (`migrateAllocationPaidAmounts`), and seed a company rule if none exists.
+
+`migrateAllocationPaidAmounts` fills only blank cells, from the status that was already there — a `paid` row was paid in full, an `allocated` row was not paid at all. A partial payment recorded since is never overwritten.
 
 `migrateBudgetAllocations` classifies **per invoice**, not per row. Six category labels — `Donate`, `Save`, `Invest`, `Spend`, `Tax Withheld`, `ACC Withheld` — are identical in both models, so a single row is ambiguous. A whole invoice is not: only a company allocation can contain `GST`, `Business Tax`, `Business ACC`, `Reserve`, `Owner Pay`, `Personal Tax` or `Personal ACC`. If any row in an invoice's set carries one of those, every row in that set is company. Amounts, labels and statuses are never rewritten — only the two identity columns are filled.
 
@@ -215,6 +223,7 @@ WorkCodes  ---< Expenses       (work_code)
 Invoices   ---< TimeEntries    (invoice_id, set when invoiced)
 Invoices   ---< Expenses       (invoice_id, set when invoiced)
 Invoices   ---< BudgetAllocations (invoice_id)
+BudgetAllocations >-< BudgetPayments (BudgetPayments.covered, many-to-many)
 BudgetRules --< Invoices       (budget_rule_id, set when allocated)
 Accounts   ---< AccountSummaries (account_id)
 ```
@@ -279,7 +288,7 @@ clasp open
 
 Then in the Apps Script editor:
 
-1. In the editor, run the `setupSheets` function (select it from the function dropdown and click Run). This creates all 11 tabs with headers, appends any missing columns, repairs allocation identity columns, and seeds a company budget rule if none exists. Safe to re-run — it is idempotent. **After the first run you can do this from the spreadsheet instead: Finance Tracker → Run setup / migrations.** Re-run it after every code update that changes the schema; the app shows a banner when columns are missing.
+1. In the editor, run the `setupSheets` function (select it from the function dropdown and click Run). This creates all 12 tabs with headers, appends any missing columns, repairs allocation identity columns, backfills `paid_amount`, and seeds a company budget rule if none exists. Safe to re-run — it is idempotent. **After the first run you can do this from the spreadsheet instead: Finance Tracker → Run setup / migrations.** Re-run it after every code update that changes the schema; the app shows a banner when columns are missing.
 2. Go to **Deploy > New deployment**
 3. Select type: **Web app**
 4. Set "Execute as": **Me**
@@ -355,19 +364,39 @@ For expenses: switch to the **Expenses** tab, select business and work code, ent
 2. Select a paid invoice and a budget rule
 3. Click **Preview allocation**. The cascade reads Gross → Business income → business buckets → **Owner Pay** → personal buckets, and the total ties back to the invoice total including GST.
 4. Click **Confirm allocation** to write the rows. Buckets that come to zero are skipped.
-5. In **Budget > Money Flow**, action each allocation as you move the money — **Mark Paid** for obligations, **Mark Set Aside** for Reserve/Save/Invest, **Mark Transferred** for Owner Pay and Spend. **Undo** reverts.
+5. In **Budget > Money Flow**, record the money as you move it — one payment per bucket, not per invoice. See below.
+
+To undo an allocation — to correct it, or because the invoice needs voiding — open the invoice and use **Remove allocation**. It is refused while any recorded payment has settled part of it; undo those under **Money Flow → History** first.
 
 ### Reading the Money Flow tab
 
-Four sections, each a row of boxes in two columns, reading top to bottom as what came in → what is owed → what is left → how it is split:
+An overview first and a ledger second. Everything above the history is totals with one action each; nothing there asks you to settle invoices one at a time.
 
+1. **Money map** — the whole journey in one band: what the company invoiced, what it owes and keeps, the **owner pay** draw across to your personal account, and what happens on the personal side. Every figure appears again below; this is the shape of it.
 1. **Revenue** — two views of the same money, deliberately **not** added together. Both count **allocated** invoices only, so a paid invoice you have not allocated yet is absent:
    1. a. **Business revenue** — everything the company invoiced, including GST.
    1. b. **Personal revenue** — what actually reached you: the owner pay draw plus sole-trader income, before personal tax, ACC and allocations.
    1. c. They overlap by the owner pay draw — business revenue the company then paid to you — so there is no combined total, and the section says so rather than leaving you to work out why the boxes do not sum.
-1. **Total obligations** — what is still owed, split into **Business** (tax, GST, ACC) and **Personal** (tax, ACC). Each box shows what is left to pay as the headline, with a progress bar and `Paid $X of $Y` underneath.
+1. **Total obligations** — what is still owed, split into **Business** (tax, GST, ACC) and **Personal** (tax, ACC). Each box shows what is left to pay as the headline, with a progress bar, `Paid $X of $Y`, and the button that settles it.
 1. **Total income** — what survives the obligations: the **Reserve pot** the business keeps, and the **Personal pot**, with the from-business and sole-trader portions named in small text.
-1. **Allocations** — the **owner pay draw** out of the company, then the personal pot split across **Save / Donate / Invest / Spend**, and finally **legacy tax withheld**. Each bucket is a box listing its allocations per invoice with a Mark Paid / Mark Set Aside / Mark Transferred button per row, and Undo to reverse one.
+1. **Allocations** — the **owner pay draw** out of the company, then the personal pot split across **Save / Donate / Invest / Spend**, and finally **legacy tax withheld** (which has no action, because that money never arrived).
+1. **History** — collapsed by default. Every payment made, newest first, each with **Undo**; then every allocation itemised per invoice, read-only.
+
+#### Recording a payment
+
+Money leaves an account in single payments, not invoice by invoice, so that is how it is recorded. Every box's button says **Pay**, whatever the bucket is — paying GST, setting money aside in Reserve and drawing owner pay are one act (money leaving the account it is sitting in), and three different words made the page read as three mechanisms. The settle mode still decides whether a bucket has a button at all: withheld money never arrived, so it has none. The button opens a panel prefilled with the full outstanding amount:
+
+1. **Pay it all**: leave the amount as it is (or click **Use full $X**) and record it.
+1. **Pay part of it**: type any smaller amount. The rest stays outstanding.
+
+The payment is applied to that bucket's **oldest unpaid invoices first**, splitting the last one where it does not cover it in full. One row goes into `BudgetPayments` naming every allocation it touched and by how much, so **Undo** in the history puts back exactly what that payment took and nothing else.
+
+Two things bound a payment:
+
+1. It is limited to the **date range on screen**, so "the remaining" means exactly the figure shown and never reaches into a period you are not looking at.
+1. It cannot exceed what is outstanding — an overpayment is refused rather than silently capped.
+
+A box that merges buckets settles all of them at once: **Personal / Tax to pay** covers `per_tax` and `legacy_tax`, and one payment clears across both.
 
 Sole-trader money is folded into the section it belongs to rather than kept in a separate silo — legacy tax and ACC join Personal obligations, and legacy Save/Donate/Invest/Spend join their company counterparts in the same box. Only tax withheld at source stays separately labelled, because that money never arrived.
 
@@ -378,6 +407,8 @@ invoiced revenue − Total obligations = Reserve + Personal pot + withheld
 Personal pot                        = Save + Donate + Invest + Spend
 ```
 
+Note that the **Total obligations** header shows what is still *owed*, which falls as payments are recorded; the identity above is over what was *allocated*.
+
 ### The Dashboard hours table
 
 **Hours & Earnings** lists, per client: hours logged, **Earned** (the value of that logged time) and **Invoiced** (billed time only — excluding expenses and GST, i.e. the invoice's `time_subtotal`). Voided invoices are excluded, and a client invoiced in the period with no hours logged in it still gets a row.
@@ -387,6 +418,12 @@ Earned and Invoiced are deliberately different sets of work: Earned is time logg
 ### The Dashboard budget tile
 
 The same figures, condensed to three groups: **Total revenue** (business and personal, with the same overlap caveat), **Total obligations** (business and personal, outstanding only), and **Personal allocations** (spend, save, invest, donate). The bucket groupings are shared globals in `utils.js.html`, so the Dashboard and the Budget page cannot drift apart.
+
+### Contract progress
+
+Time tagged with a contract belongs to that contract. Untagged time is attributed to the client's contract whose period covers its date — **but only when exactly one does**. Where two contracts for the same client overlap, nothing in the data says which one the work was for, so it is counted against neither and reported under the Contract Progress tile instead. Set the contract on those entries under **Hours** to bring them in.
+
+The rule lives in one place (`attributeTimeToContracts` in `ContractService.gs`); the Dashboard and the Contracts tab both call it, so they cannot report different spend for the same contract.
 
 ### Account Monitoring
 
@@ -411,7 +448,9 @@ MC/
 │   ├── check-sheet-guards.js       # column guards, schema check, allocation repair
 │   ├── check-budget-render.js      # Budget page + Dashboard markup and totals
 │   ├── check-invoice-ids.js        # invoice number format and sequencing
-│   └── check-client-smoke.js       # every client page renders without throwing
+│   ├── check-client-smoke.js       # every client page renders without throwing
+│   ├── check-app-flows.js          # invoice lines, voiding, dashboard agreement, guards
+│   └── screenshot-budget.js        # renders the Money Flow tab to PNGs for review
 └── src/
     ├── appsscript.json       # Apps Script manifest (runtime config, webapp settings)
     ├── server/

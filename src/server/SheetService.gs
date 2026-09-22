@@ -332,6 +332,41 @@ function dateOnly(val) {
 /**
  * Find the column index (1-based) for a given header name in a sheet.
  */
+/**
+ * Require a real YYYY-MM-DD date, and return it.
+ *
+ * A row whose date does not parse is not merely untidy — dateOnly() gives '',
+ * every date filter in the app skips it, and the record is invisible from the
+ * moment it is written. Better to refuse the write.
+ */
+function requireDate(value, label) {
+  var d = dateOnly(value);
+  if (!d) {
+    throw new Error((label || 'Date') + ' is not a valid date: "' + value + '". Expected YYYY-MM-DD.');
+  }
+  var parts = d.split('-');
+  var probe = new Date(+parts[0], +parts[1] - 1, +parts[2]);
+  if (probe.getFullYear() !== +parts[0] || probe.getMonth() !== +parts[1] - 1 || probe.getDate() !== +parts[2]) {
+    throw new Error((label || 'Date') + ' is not a real date: "' + d + '".');
+  }
+  return d;
+}
+
+/**
+ * Drop a client-supplied primary key before an insert.
+ *
+ * appendRow only generates an id when the field is empty, so a payload that
+ * carried one — a stale form, a retried request — would append a SECOND row
+ * under an existing id, and findById would then return whichever came first.
+ *
+ * Only for sheets whose ids the server generates. A work code's id is the code
+ * itself ('DEV'), typed by the user, so WorkCodes is deliberately not one.
+ */
+function stripGeneratedId(data, idField) {
+  if (data && Object.prototype.hasOwnProperty.call(data, idField)) delete data[idField];
+  return data;
+}
+
 function getColumnIndex(sheet, headerName) {
   var headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
   var idx = headers.indexOf(headerName);
