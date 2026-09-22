@@ -238,8 +238,8 @@ function renderTimeEntriesTable(entries) {
     if (e.invoice_id && e.invoice_id !== '') {
       actionsHtml = '<span class="badge badge-paid">' + escapeHtml(e.invoice_id) + '</span>';
     } else {
-      actionsHtml = '<button type="button" class="btn-small btn-subtle" onclick="editTimeEntry(\'' + jsAttr(e.entry_id) + '\')">Edit</button> ' +
-        '<button type="button" class="btn-small btn-subtle" onclick="deleteTimeEntry(\'' + jsAttr(e.entry_id) + '\')">Delete</button>';
+      actionsHtml = '<button type="button" class="btn-small btn-subtle" onclick="editTimeEntry(\'' + escapeHtml(e.entry_id) + '\')">Edit</button> ' +
+        '<button type="button" class="btn-small btn-subtle" onclick="deleteTimeEntry(\'' + escapeHtml(e.entry_id) + '\')">Delete</button>';
     }
     html += '<tr>' +
       '<td>' + formatDate(e.date) + '</td>' +
@@ -440,8 +440,8 @@ function renderExpensesTable(expenses) {
     if (e.invoice_id && e.invoice_id !== '') {
       actionsHtml = '<span class="badge badge-paid">' + escapeHtml(e.invoice_id) + '</span>';
     } else {
-      actionsHtml = '<button type="button" class="btn-small btn-subtle" onclick="editExpense(\'' + jsAttr(e.expense_id) + '\')">Edit</button> ' +
-        '<button type="button" class="btn-small btn-subtle" onclick="deleteExpense(\'' + jsAttr(e.expense_id) + '\')">Delete</button>';
+      actionsHtml = '<button type="button" class="btn-small btn-subtle" onclick="editExpense(\'' + escapeHtml(e.expense_id) + '\')">Edit</button> ' +
+        '<button type="button" class="btn-small btn-subtle" onclick="deleteExpense(\'' + escapeHtml(e.expense_id) + '\')">Delete</button>';
     }
     html += '<tr>' +
       '<td>' + formatDate(e.date) + '</td>' +
