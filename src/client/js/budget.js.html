@@ -230,6 +230,39 @@ function revenueViews(summary, cats) {
   };
 }
 
+/**
+ * Sum the summary's categories by what they ARE, not by which box shows them.
+ *
+ * The display groupings (BIZ_OBLIGATIONS and friends) deliberately merge
+ * scopes — sole-trader tax is shown under Personal, sole-trader GST under
+ * Business GST — which is right for a box answering "what do I owe" and wrong
+ * for a column that has to balance against the revenue on the same side of the
+ * map. The map partitions the same money the revenue figures count, so it is
+ * built from the server's scope and group tagging instead.
+ *
+ * Transfers are skipped: the owner pay draw is the bridge between the two
+ * columns, not a line inside either of them.
+ */
+function sumWhere(summary, predicate) {
+  var out = { allocated: 0, paid: 0, outstanding: 0 };
+  ((summary && summary.scopes) || []).forEach(function(group) {
+    (group.categories || []).forEach(function(cat) {
+      if (cat.isTransfer) return;
+      if (!predicate(cat)) return;
+      out.allocated += cat.allocated;
+      out.paid += cat.paid;
+      out.outstanding += cat.outstanding;
+    });
+  });
+  return out;
+}
+
+/** Money on the personal side that is still to be split up, not owed out. */
+function isDistribution(cat) {
+  return (cat.scope === 'personal' && cat.group === 'personal_distribution') ||
+         (cat.scope === 'legacy' && cat.group === 'distribution');
+}
+
 /** Every category key that sits behind a named group of boxes. */
 function keysOf(rows) {
   var keys = [];
@@ -380,9 +413,20 @@ function renderMoneyMap(summary, cats) {
   var draw = catOf(cats, 'owner_pay');
   var reserve = catOf(cats, 'biz_reserve');
 
-  var bizOwed = sumCats(cats, keysOf(BIZ_OBLIGATIONS));
-  var perOwed = sumCats(cats, keysOf(PERSONAL_OBLIGATIONS));
-  var personalPot = sumCats(cats, keysOf(PERSONAL_ALLOCATIONS));
+  // By scope, so each column balances against its own revenue:
+  //   business in - obligations - reserve = the draw
+  //   personal in - obligations           = the pot
+  // These can differ from the section subtotals below, and legitimately so:
+  // sole-trader GST is one GST bill with the company's, so the GST box adds
+  // them together — but that money sat in the personal account, so the map
+  // counts it there.
+  var bizOwed = sumWhere(summary, function(c) {
+    return c.scope === 'business' && c.key !== 'biz_reserve';
+  });
+  var perOwed = sumWhere(summary, function(c) {
+    return (c.scope === 'personal' || c.scope === 'legacy') && !isDistribution(c);
+  });
+  var personalPot = sumWhere(summary, isDistribution);
 
   function line(label, amount, note) {
     return '<div class="money-map__line">' +

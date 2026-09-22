@@ -401,6 +401,17 @@ A box that merges buckets settles all of them at once: **Personal / Tax to pay**
 
 Sole-trader money is folded into the section it belongs to rather than kept in a separate silo — legacy tax and ACC join Personal obligations, and legacy Save/Donate/Invest/Spend join their company counterparts in the same box.
 
+#### The money map's columns
+
+The map's two columns are built from the server's **scope** tagging, not from the display groupings the boxes below use. The groupings deliberately merge scopes — sole-trader tax appears under Personal, sole-trader GST under Business GST — which is right for a box answering "what do I owe" and wrong for a column that has to balance against the revenue on its own side. So each column balances exactly:
+
+```
+business in − obligations − reserve = the owner pay draw
+personal in − obligations           = the personal pot
+```
+
+Where a sole-trader invoice carried GST, the Business **GST to pay** box and the map's business **Obligations out** differ by exactly that amount, and that is correct: it is one GST bill with the company's, but the money sat in the personal account.
+
 #### Tax withheld at source
 
 Tax and ACC the payer deducted belong to the **obligation they settled**, not to a category of their own. A payer who withheld tax on a sole-trader invoice paid that tax to the IRD out of the same obligation — it simply never passed through your account. So `legacy_tax_withheld` is counted inside Personal **Tax to pay** (and `biz_tax_withheld` inside Business Tax to pay, and the two ACC equivalents likewise).
@@ -413,7 +424,7 @@ What that changes:
 
 Keeping it apart understated every tax figure by the amount already paid, and put a box on the page for money that needs nothing done with it.
 
-The sections reconcile on **invoiced** revenue — business plus sole trader. The personal view overlaps that and plays no part in the identity. `tools/check-budget-render.js` asserts both:
+The sections reconcile on **invoiced** revenue — business plus sole trader. The personal view overlaps that and plays no part in the identity. `tools/check-budget-render.js` asserts both, and `tools/check-reconciliation.js` asserts them over a whole book of invoices:
 
 ```
 invoiced revenue − Total obligations = Reserve + Personal pot
@@ -463,6 +474,7 @@ MC/
 │   ├── check-invoice-ids.js        # invoice number format and sequencing
 │   ├── check-client-smoke.js       # every client page renders without throwing
 │   ├── check-app-flows.js          # invoice lines, voiding, dashboard agreement, guards
+│   ├── check-reconciliation.js     # does the money add up? identities, end to end
 │   └── screenshot-budget.js        # renders the Money Flow tab to PNGs for review
 └── src/
     ├── appsscript.json       # Apps Script manifest (runtime config, webapp settings)

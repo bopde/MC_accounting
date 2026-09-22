@@ -278,7 +278,7 @@ function loadYearOverview() {
     // --- Combined matrix ---
     html += '<article>' +
       '<header><h3 style="margin:0;">Balances · ' + year + ' → ' + nextYear.slice(-2) + '</h3>' +
-      '<p class="muted" style="margin:0.25rem 0 0;">End-of-month balance per account. Coloured deltas show change vs previous month.</p></header>' +
+      '<p class="muted" style="margin:0.25rem 0 0;">End-of-month balance per account. Coloured deltas show the change since the previous month that has a balance &mdash; a skipped month is spanned, not counted as zero.</p></header>' +
       '<div class="scroll-x">' +
       '<table class="data-table data-table--matrix"><thead><tr>' +
         '<th class="sticky-col">Account</th>';
