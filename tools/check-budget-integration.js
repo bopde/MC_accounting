@@ -53,11 +53,17 @@ const db = {
       gst_amount: 23.81, total: 182.54, status: 'paid', budget_rule_id: 'BR-000', _rowIndex: 3 }
   ],
   BudgetRules: [Object.assign({}, COMPANY_RULE, { _rowIndex: 2 })],
-  // A pre-company allocation: free-text label, no category_key or scope.
+  // Pre-company allocations: free-text labels, no category_key or scope.
+  // The withheld row is what the payer deducted and paid to the IRD — already
+  // settled, and the case that proves withholding is counted inside its
+  // obligation rather than off to one side.
   BudgetAllocations: [
+    { allocation_id: 'BA-000', invoice_id: '0425', category: 'Tax Withheld', category_key: '',
+      scope: '', percentage: 0.1, amount: 15.87, status: 'paid', paid_amount: 15.87,
+      transfer_date: '2026-04-30', notes: 'Auto-paid (withheld by payer)', _rowIndex: 2 },
     { allocation_id: 'BA-001', invoice_id: '0425', category: 'Spend', category_key: '',
       scope: '', percentage: 0.7, amount: 111.11, status: 'allocated',
-      transfer_date: '', notes: '', _rowIndex: 2 }
+      transfer_date: '', notes: '', _rowIndex: 3 }
   ],
   BudgetPayments: []
 };
@@ -203,16 +209,19 @@ console.log('    accountHoldings: ' + JSON.stringify(summary.accountHoldings));
 
 assert(summary.scopes.map(function(s) { return s.scope; }).join(',') === 'business,bridge,personal,legacy',
   'scopes come back in registry order');
-assert(r2(summary.totals.allocated) === r2(5750 + 111.11),
-  'totals exclude Owner Pay and include the legacy row, got ' + summary.totals.allocated);
-assert(summary.totals.allocationCount === 11,
+assert(r2(summary.totals.allocated) === r2(5750 + 111.11 + 15.87),
+  'totals exclude Owner Pay and include the legacy rows, got ' + summary.totals.allocated);
+assert(summary.totals.allocationCount === 12,
   'allocation count excludes the Owner Pay transfer, got ' + summary.totals.allocationCount);
 
 const legacyScope = summary.scopes.find(function(s) { return s.scope === 'legacy'; });
-assert(legacyScope.categories.length === 1 && legacyScope.categories[0].key === 'legacy_spend',
-  'a row with no category_key resolves to its legacy bucket, not the new personal Spend');
+const legacyKeysFound = legacyScope.categories.map(function(c) { return c.key; }).sort().join(',');
+assert(legacyKeysFound === 'legacy_spend,legacy_tax_withheld',
+  'rows with no category_key resolve to their legacy buckets, not the new personal ones, got ' +
+  legacyKeysFound);
 assert(summary.accountHoldings.legacy === 111.11,
-  'legacy money is kept out of both business and personal holdings');
+  'legacy holdings count what is still owed — the withheld row is already settled, ' +
+  'so it is not money sitting anywhere, got ' + summary.accountHoldings.legacy);
 
 const businessExpected = r2(750 + 1400 + 50 + 500);
 assert(r2(summary.accountHoldings.business) === businessExpected,
@@ -229,9 +238,14 @@ assert(personalScope.categories.every(function(c) { return c.settle && c.key; })
 
 console.log('\nMoney Flow reconciliation');
 
-// Same key groupings the page uses (src/client/js/budget.js.html).
-const BIZ_OBLIGATION_KEYS = ['biz_tax', 'biz_gst', 'legacy_gst', 'biz_acc'];
-const PER_OBLIGATION_KEYS = ['per_tax', 'legacy_tax', 'per_acc', 'legacy_acc'];
+// Same key groupings the page uses (src/client/js/budget.js.html). Tax and ACC
+// withheld at source sit inside the obligation they settled — the payer paid
+// that tax out of the same obligation, it just never passed through the
+// account — so they are not a category of their own here either.
+const BIZ_OBLIGATION_KEYS = ['biz_tax', 'biz_tax_withheld', 'biz_gst', 'legacy_gst',
+  'biz_acc', 'biz_acc_withheld'];
+const PER_OBLIGATION_KEYS = ['per_tax', 'legacy_tax', 'legacy_tax_withheld',
+  'per_acc', 'legacy_acc', 'legacy_acc_withheld'];
 const DISTRIBUTION_KEYS = ['per_save', 'legacy_save', 'per_donate', 'legacy_donate',
   'per_invest', 'legacy_invest', 'per_spend', 'legacy_spend'];
 const WITHHELD_KEYS = ['legacy_tax_withheld', 'legacy_acc_withheld',
@@ -278,10 +292,15 @@ console.log('    obligations ' + totalObligations + ', reserve ' + reserve +
 
 assert(totalRevenue === r2(flow.totals.allocated),
   'Header 1 boxes sum to the server total, got ' + totalRevenue + ' vs ' + flow.totals.allocated);
-// Header 1 - Header 2 = Header 3 (+ any money withheld at source, shown in Header 4).
-assert(r2(totalRevenue - totalObligations) === r2(reserve + personalPot + withheld),
-  'revenue - obligations = reserve + personal pot + withheld, got ' +
-  r2(totalRevenue - totalObligations) + ' vs ' + r2(reserve + personalPot + withheld));
+// Header 1 - Header 2 = Header 3, with no loose term: withholding is counted
+// inside Header 2, so what is left after obligations IS the income.
+assert(r2(totalRevenue - totalObligations) === r2(reserve + personalPot),
+  'revenue - obligations = reserve + personal pot, got ' +
+  r2(totalRevenue - totalObligations) + ' vs ' + r2(reserve + personalPot));
+assert(withheld > 0,
+  'the fixture actually withholds something, or the line above proves nothing');
+assert(sumKeys(map, PER_OBLIGATION_KEYS) >= sumKeys(map, ['legacy_tax_withheld']),
+  'withheld tax is inside personal obligations');
 // Header 4's four buckets must cover every distributable personal category the
 // server returns. Catches a bucket being added to the registry but not the page.
 const flowPersonal = (flow.scopes || []).find(function(g) { return g.scope === 'personal'; });
@@ -315,7 +334,9 @@ app.updateAllocationStatus(gstRow.allocation_id, 'paid', '2026-06-02', 'Paid to 
 const after = app.getBudgetSummary(RANGE);
 assert(r2(after.accountHoldings.business) === r2(businessExpected - 750),
   'paying GST removes it from business holdings, got ' + after.accountHoldings.business);
-assert(r2(after.totals.paid) === 750, 'paid total is 750, got ' + after.totals.paid);
+// 750 GST, plus the 15.87 the payer withheld, which was paid from the start.
+assert(r2(after.totals.paid) === r2(750 + 15.87),
+  'paid total counts withheld money too, got ' + after.totals.paid);
 
 app.updateAllocationStatus(gstRow.allocation_id, 'allocated');
 const undone = app.getBudgetSummary(RANGE);

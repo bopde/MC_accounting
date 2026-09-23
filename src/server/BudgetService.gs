@@ -25,33 +25,54 @@
  *   Tier 3 — Distribution (Donate/Save/Invest/Spend): % of Net → must sum to 100%
  */
 function computeAllocationAmounts(rule, gross) {
+  gross = round2(gross);
+
   var withheld = 0;
   BUDGET_CATEGORIES.forEach(function(cat, i) {
     if (WITHHELD_CATEGORIES.indexOf(cat) !== -1) {
-      withheld += Math.round(gross * (Number(rule[BUDGET_PCT_FIELDS[i]]) || 0) * 100) / 100;
+      withheld += round2(gross * (Number(rule[BUDGET_PCT_FIELDS[i]]) || 0));
     }
   });
-  var adjusted = gross - withheld;
+  withheld = round2(withheld);
+
+  // Rounded at every stage, like the company cascade: an unrounded `adjusted`
+  // carries binary-float dust into every percentage taken off it.
+  var adjusted = round2(gross - withheld);
 
   var obligations = 0;
   BUDGET_CATEGORIES.forEach(function(cat, i) {
     if (OBLIGATION_CATEGORIES.indexOf(cat) !== -1) {
-      obligations += Math.round(adjusted * (Number(rule[BUDGET_PCT_FIELDS[i]]) || 0) * 100) / 100;
+      obligations += round2(adjusted * (Number(rule[BUDGET_PCT_FIELDS[i]]) || 0));
     }
   });
-  var net = adjusted - obligations;
+  obligations = round2(obligations);
+
+  var net = round2(adjusted - obligations);
 
   var amounts = {};
   BUDGET_CATEGORIES.forEach(function(cat, i) {
     var pct = Number(rule[BUDGET_PCT_FIELDS[i]]) || 0;
     if (WITHHELD_CATEGORIES.indexOf(cat) !== -1) {
-      amounts[cat] = Math.round(gross * pct * 100) / 100;
+      amounts[cat] = round2(gross * pct);
     } else if (OBLIGATION_CATEGORIES.indexOf(cat) !== -1) {
-      amounts[cat] = Math.round(adjusted * pct * 100) / 100;
-    } else {
-      amounts[cat] = Math.round(net * pct * 100) / 100;
+      amounts[cat] = round2(adjusted * pct);
     }
   });
+
+  // Distribution last, with the residual taking the difference. Four shares of
+  // net, each rounded to the cent, do not sum to net — so without this the
+  // lines came to a cent or two less than the invoice, and the sole-trader
+  // cascade quietly failed the conservation the company one guarantees.
+  var residualLabel = getCategoryDef(LEGACY_RESIDUAL_KEY).label;
+  var distributed = 0;
+  BUDGET_CATEGORIES.forEach(function(cat, i) {
+    if (DISTRIBUTION_CATEGORIES.indexOf(cat) === -1) return;
+    if (cat === residualLabel) return;
+    var amt = round2(net * (Number(rule[BUDGET_PCT_FIELDS[i]]) || 0));
+    amounts[cat] = amt;
+    distributed += amt;
+  });
+  amounts[residualLabel] = round2(net - round2(distributed));
 
   return { amounts: amounts, withheld: withheld, adjusted: adjusted, obligations: obligations, net: net };
 }

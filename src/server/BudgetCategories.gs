@@ -83,6 +83,11 @@ var BUDGET_CATEGORY_DEFS = [
 /** The distribution bucket that absorbs the rounding residual. */
 var PERSONAL_RESIDUAL_KEY = 'per_spend';
 
+// The sole-trader cascade's equivalent. Its four distribution percentages sum
+// to 100% of net, but four separately rounded shares do not, so one of them
+// has to absorb the difference or the allocation loses a cent of the invoice.
+var LEGACY_RESIDUAL_KEY = 'legacy_spend';
+
 /**
  * The pre-company sole-trader buckets. Kept so historical allocations still
  * render and so a legacy rule can still be applied if an old invoice needs

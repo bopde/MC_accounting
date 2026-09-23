@@ -462,6 +462,8 @@
   .mini-tile__bar { height: 4px; background: var(--rule-2); border-radius: 2px; margin-top: 0.3rem; overflow: hidden; }
   .mini-tile__bar-paid { height: 100%; background: var(--sage); transition: width 0.3s ease; }
   .mini-tile__split { display: flex; justify-content: space-between; font-size: 0.7rem; color: var(--muted); margin-top: 0.1rem; }
+  /* Explains the paid figure above it, so it sits under the split, not the headline */
+  .mini-tile__note { font-size: 0.68rem; color: var(--muted); font-style: italic; margin-top: 0.15rem; }
 
   /* Single box on its own row, not stretched across the full width */
   .flow-grid--single { grid-template-columns: minmax(0, 320px); }

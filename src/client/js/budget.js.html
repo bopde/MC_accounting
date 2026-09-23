@@ -22,13 +22,20 @@
  *
  * The sections reconcile on invoiced revenue (business + sole trader; the
  * personal view overlaps it and plays no part in the identity):
- *   invoiced revenue - Total obligations = Reserve + Personal pot + withheld
+ *   invoiced revenue - Total obligations = Reserve + Personal pot
  *   Personal pot = Save + Donate + Invest + Spend
  *
  * Sole-trader (legacy) money is folded into the section it belongs to rather
  * than sitting in its own silo: legacy tax and ACC join Personal obligations,
- * and legacy Save/Donate/Invest/Spend join their company counterparts. Only
- * tax withheld at source stays separately labelled, because it never arrived.
+ * and legacy Save/Donate/Invest/Spend join their company counterparts.
+ *
+ * Tax and ACC WITHHELD AT SOURCE are part of the obligation they settled, not
+ * a category of their own. A payer who withheld tax paid it to the IRD out of
+ * the same obligation; it simply never passed through your account. Keeping it
+ * apart understated every tax figure by the amount already paid, and put a box
+ * on the page for money that needs nothing done with it. It is now inside its
+ * obligation, where it raises Paid without touching what is still to pay — and
+ * the identity above loses its `+ withheld` term as a result.
  *
  * Category definitions, ordering and settle wording come from the server
  * registry (BudgetCategories.gs) via AppCache.budgetCategories. This file does
@@ -223,6 +230,39 @@ function revenueViews(summary, cats) {
   };
 }
 
+/**
+ * Sum the summary's categories by what they ARE, not by which box shows them.
+ *
+ * The display groupings (BIZ_OBLIGATIONS and friends) deliberately merge
+ * scopes — sole-trader tax is shown under Personal, sole-trader GST under
+ * Business GST — which is right for a box answering "what do I owe" and wrong
+ * for a column that has to balance against the revenue on the same side of the
+ * map. The map partitions the same money the revenue figures count, so it is
+ * built from the server's scope and group tagging instead.
+ *
+ * Transfers are skipped: the owner pay draw is the bridge between the two
+ * columns, not a line inside either of them.
+ */
+function sumWhere(summary, predicate) {
+  var out = { allocated: 0, paid: 0, outstanding: 0 };
+  ((summary && summary.scopes) || []).forEach(function(group) {
+    (group.categories || []).forEach(function(cat) {
+      if (cat.isTransfer) return;
+      if (!predicate(cat)) return;
+      out.allocated += cat.allocated;
+      out.paid += cat.paid;
+      out.outstanding += cat.outstanding;
+    });
+  });
+  return out;
+}
+
+/** Money on the personal side that is still to be split up, not owed out. */
+function isDistribution(cat) {
+  return (cat.scope === 'personal' && cat.group === 'personal_distribution') ||
+         (cat.scope === 'legacy' && cat.group === 'distribution');
+}
+
 /** Every category key that sits behind a named group of boxes. */
 function keysOf(rows) {
   var keys = [];
@@ -247,8 +287,16 @@ function bigTile(label, amount, detail) {
   '</div>';
 }
 
-/** Outstanding as the headline, with a progress bar and "Paid X of Y". */
-function owedTile(label, figures, detail) {
+/**
+ * Outstanding as the headline, with a progress bar and "Paid X of Y".
+ *
+ * `detail` sits under the headline and must therefore describe the SAME
+ * figure: a note reading "incl. $4,497.40 sole trader" under a $4,287.02
+ * headline says the sole-trader part is bigger than the whole, because the
+ * two were measured against different things. Anything about the paid or
+ * allocated figures goes in `footnote`, next to them.
+ */
+function owedTile(label, figures, detail, footnote) {
   return '<div class="mini-tile mini-tile--split">' +
     '<span class="mini-tile__label">' + escapeHtml(label) + '</span>' +
     '<span class="mini-tile__value">' + formatCurrency(figures.outstanding || 0) + '</span>' +
@@ -260,6 +308,7 @@ function owedTile(label, figures, detail) {
       '<span>Paid ' + formatCurrency(figures.paid || 0) + '</span>' +
       '<span>of ' + formatCurrency(figures.allocated || 0) + '</span>' +
     '</div>' +
+    (footnote ? '<span class="mini-tile__note">' + escapeHtml(footnote) + '</span>' : '') +
   '</div>';
 }
 
@@ -271,11 +320,11 @@ function owedTile(label, figures, detail) {
  * is recorded here. `keys` is every registry key behind the box, which is more
  * than one wherever a company bucket merges with its sole-trader counterpart.
  */
-function payableTile(row, cats, hostId, detail) {
+function payableTile(row, cats, hostId, detail, footnote) {
   var figures = sumCats(cats, row.keys);
   var settle = row.settle || 'pay';
   var verb = settleShortVerb(settle);
-  var keys = row.keys.join(',');
+  var keys = payableKeys(row.keys).join(',');
 
   var settled = figures.allocated > 0 && figures.outstanding <= 0.004;
   var action = settled
@@ -285,9 +334,20 @@ function payableTile(row, cats, hostId, detail) {
         jsAttr(settle) + '\',' + (figures.outstanding || 0) + ')">' + escapeHtml(verb) + '</button>';
 
   return '<div class="tile-with-action">' +
-    owedTile(row.label, figures, detail) +
+    owedTile(row.label, figures, detail, footnote) +
     '<div class="tile-action">' + action + '</div>' +
   '</div>';
+}
+
+/**
+ * The keys a payment may actually be applied to.
+ *
+ * Money withheld at source counts towards the figures — it was paid, by the
+ * payer rather than by you — but there is nothing left to pay against it, so
+ * it never forms part of what a payment targets.
+ */
+function payableKeys(keys) {
+  return keys.filter(function(key) { return !isWithheldKey(key); });
 }
 
 /**
@@ -304,7 +364,7 @@ function potAction(row, cats, hostId) {
   var action = settled
     ? '<span class="tile-action__done">paid in full</span>'
     : '<button type="button" class="btn-small btn-primary" onclick="openPayPanel(\'' +
-        jsAttr(hostId) + '\',\'' + jsAttr(row.keys.join(',')) + '\',\'' + jsAttr(row.label) + '\',\'' +
+        jsAttr(hostId) + '\',\'' + jsAttr(payableKeys(row.keys).join(',')) + '\',\'' + jsAttr(row.label) + '\',\'' +
         jsAttr(settle) + '\',' + (figures.outstanding || 0) + ')">' + escapeHtml(verb) + '</button>';
 
   return '<div class="pot-action">' +
@@ -314,6 +374,33 @@ function potAction(row, cats, hostId) {
     '</span>' +
     action +
   '</div>';
+}
+
+/**
+ * How much of what is STILL TO PAY came from the sole-trader years.
+ *
+ * Measured against outstanding, not against the allocated total, because it
+ * is printed under the outstanding headline. Measured against the total it
+ * could exceed the number directly above it, which is how this was first
+ * noticed: "$4,287.02 still to pay, incl. $4,497.40 sole trader".
+ */
+function soleTraderShare(cats, row) {
+  if (!row.legacyKeys) return 'still to pay';
+  var legacy = sumCats(cats, row.legacyKeys);
+  return legacy.outstanding > 0
+    ? 'incl. ' + formatCurrency(legacy.outstanding) + ' sole trader'
+    : 'still to pay';
+}
+
+/**
+ * Why Paid can be more than you have ever actually paid: the payer withheld
+ * some of it. Sits beside the paid figure, which is the one it explains.
+ */
+function withheldFootnote(cats, row) {
+  if (!row.withheldKeys) return '';
+  var withheld = sumCats(cats, row.withheldKeys);
+  if (withheld.allocated <= 0) return '';
+  return formatCurrency(withheld.allocated) + ' of the paid total was withheld at source';
 }
 
 /** Where a payment panel opens. One per section, filled on demand. */
@@ -362,9 +449,20 @@ function renderMoneyMap(summary, cats) {
   var draw = catOf(cats, 'owner_pay');
   var reserve = catOf(cats, 'biz_reserve');
 
-  var bizOwed = sumCats(cats, keysOf(BIZ_OBLIGATIONS));
-  var perOwed = sumCats(cats, keysOf(PERSONAL_OBLIGATIONS));
-  var personalPot = sumCats(cats, keysOf(PERSONAL_ALLOCATIONS));
+  // By scope, so each column balances against its own revenue:
+  //   business in - obligations - reserve = the draw
+  //   personal in - obligations           = the pot
+  // These can differ from the section subtotals below, and legitimately so:
+  // sole-trader GST is one GST bill with the company's, so the GST box adds
+  // them together — but that money sat in the personal account, so the map
+  // counts it there.
+  var bizOwed = sumWhere(summary, function(c) {
+    return c.scope === 'business' && c.key !== 'biz_reserve';
+  });
+  var perOwed = sumWhere(summary, function(c) {
+    return (c.scope === 'personal' || c.scope === 'legacy') && !isDistribution(c);
+  });
+  var personalPot = sumWhere(summary, isDistribution);
 
   function line(label, amount, note) {
     return '<div class="money-map__line">' +
@@ -433,13 +531,8 @@ function renderObligationsSection(cats) {
 
     var tiles = '<div class="flow-grid flow-grid--stack">' +
       rows.map(function(row) {
-        // Name the sole-trader portion when there is one, so a merged figure
-        // never looks like it all came from the company.
-        var legacy = row.legacyKeys ? sumCats(cats, row.legacyKeys) : null;
-        var detail = (legacy && legacy.allocated > 0)
-          ? 'incl. ' + formatCurrency(legacy.allocated) + ' sole trader'
-          : 'still to pay';
-        return payableTile(row, cats, 'pay-host-obligations', detail);
+        return payableTile(row, cats, 'pay-host-obligations',
+          soleTraderShare(cats, row), withheldFootnote(cats, row));
       }).join('') +
     '</div>';
 
@@ -488,7 +581,6 @@ function renderIncomeSection(cats) {
 
 function renderAllocationsSection(cats) {
   var draw = catOf(cats, 'owner_pay');
-  var withheld = sumCats(cats, WITHHELD_KEYS);
   var personalTotal = sumCats(cats, keysOf(PERSONAL_ALLOCATIONS));
 
   // No single total: the draw and the personal pot below it are the same money
@@ -506,26 +598,12 @@ function renderAllocationsSection(cats) {
     formatCurrency(personalTotal.outstanding) + ' still to pay');
   html += '<div class="flow-grid">' +
     PERSONAL_ALLOCATIONS.map(function(row) {
-      var legacy = sumCats(cats, [row.keys[1]]);
-      var detail = legacy.allocated > 0
-        ? 'incl. ' + formatCurrency(legacy.allocated) + ' sole trader'
-        : 'still to pay';
-      return payableTile(row, cats, 'pay-host-allocations', detail);
+      // keys are [company, sole trader], so the second one is the legacy share.
+      return payableTile(row, cats, 'pay-host-allocations',
+        soleTraderShare(cats, { legacyKeys: [row.keys[1]] }));
     }).join('') +
   '</div>';
   html += payHost('pay-host-allocations');
-
-  // Withholding: money the payer kept, so there is nothing to action.
-  if (withheld.allocated > 0) {
-    html += subHeading('Legacy: tax withheld', withheld.allocated, 'deducted at source');
-    html += '<div class="flow-grid flow-grid--single">' +
-      '<div class="mini-tile mini-tile--withheld">' +
-        '<span class="mini-tile__label">Tax withheld at source</span>' +
-        '<span class="mini-tile__value">' + formatCurrency(withheld.allocated) + '</span>' +
-        '<span class="mini-tile__detail">never reached your account — nothing to do</span>' +
-      '</div>' +
-    '</div>';
-  }
 
   return html + '</section>';
 }
@@ -705,8 +783,7 @@ function renderAllocationHistory(cats) {
     .concat(PERSONAL_OBLIGATIONS)
     .concat([{ label: 'Reserve', settle: 'hold', keys: ['biz_reserve'] }])
     .concat([{ label: 'Owner pay draw', settle: 'transfer', keys: ['owner_pay'] }])
-    .concat(PERSONAL_ALLOCATIONS)
-    .concat([{ label: 'Tax withheld at source', settle: 'auto_paid', keys: WITHHELD_KEYS }]);
+    .concat(PERSONAL_ALLOCATIONS);
 
   html += '<div class="category-list">';
   var any = false;

@@ -329,6 +329,11 @@ function dashHours(timeEntries, invoices, bizMap) {
   var totalHrs = 0;
   var totalByCur = {};
   var invoicedByCur = {};
+  // Hours per currency as well as overall: the average rate below divides one
+  // currency's earnings, so it has to divide by that currency's hours. Dividing
+  // NZD earnings by hours that included an Australian client's gave a rate that
+  // belonged to neither of them.
+  var hoursByCur = {};
 
   function rowFor(bizId) {
     var key = normalizeId(bizId);
@@ -349,6 +354,7 @@ function dashHours(timeEntries, invoices, bizMap) {
     row.earned += te.line_total;
     totalHrs += te.hours;
     totalByCur[row.currency] = (totalByCur[row.currency] || 0) + te.line_total;
+    hoursByCur[row.currency] = (hoursByCur[row.currency] || 0) + te.hours;
   });
 
   // Invoiced time, ex-GST and excluding expenses. A business can be invoiced in
@@ -398,8 +404,10 @@ function dashHours(timeEntries, invoices, bizMap) {
       '</p>';
 
     if (totalHrs > 0) {
-      var rateHtml = Object.keys(totalByCur).map(function(cur) {
-        return formatCurrency(totalByCur[cur] / totalHrs, cur) + '/hr';
+      var rateHtml = Object.keys(totalByCur).filter(function(cur) {
+        return (hoursByCur[cur] || 0) > 0;
+      }).map(function(cur) {
+        return formatCurrency(totalByCur[cur] / hoursByCur[cur], cur) + '/hr';
       }).join(', ');
       html += '<p class="muted small" style="margin:0.25rem 0 0;">Avg rate: ' + rateHtml + '</p>';
     }
