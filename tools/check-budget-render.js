@@ -262,7 +262,30 @@ check('the personal tax box counts withheld tax as paid',
 check('and counts it towards the total, not towards what is owed',
   !!personalTax && /of \$1,267\.00/.test(personalTax[0]) && /\$967\.00/.test(personalTax[0]));
 check('the box says why Paid is more than you have paid',
-  html.indexOf('$100.00 already withheld at source') !== -1);
+  html.indexOf('$100.00 of the paid total was withheld at source') !== -1);
+// $252 of sole-trader tax, $200 of it already paid, so $52 of what is STILL
+// OWED is sole trader. Measured against the allocated total it would read
+// $352.00 — under a $967.00 headline that is merely odd, but on a real book
+// the sole-trader share exceeded the headline and read as impossible.
+check('the sole-trader note measures what is still to pay, like the figure above it',
+  html.indexOf('incl. $52.00 sole trader') !== -1 &&
+  html.indexOf('incl. $352.00 sole trader') === -1);
+
+// The invariant behind that, over every box on the page: a part of something
+// can never be bigger than the thing it is part of.
+const inclOverruns = Array.from(html.matchAll(
+  /mini-tile__label">([^<]*)<[\s\S]*?mini-tile__value">([^<]*)<[\s\S]*?mini-tile__detail">([^<]*)</g))
+  .map(function(m) {
+    const incl = /incl\. \$([\d,.]+)/.exec(m[3]);
+    if (!incl) return null;
+    return money(incl[1]) > money(m[2]) + 0.005
+      ? m[1] + ': incl. ' + incl[1] + ' under a headline of ' + m[2]
+      : null;
+  }).filter(Boolean);
+check('no "incl." figure in any box exceeds that box\'s headline' +
+  (inclOverruns.length ? ' — ' + inclOverruns.join('; ') : ''),
+  inclOverruns.length === 0);
+
 check('a payment is never aimed at the withheld bucket',
   html.indexOf("'per_tax,legacy_tax'") !== -1 &&
   html.indexOf('legacy_tax_withheld') === -1);

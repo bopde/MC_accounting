@@ -287,8 +287,16 @@ function bigTile(label, amount, detail) {
   '</div>';
 }
 
-/** Outstanding as the headline, with a progress bar and "Paid X of Y". */
-function owedTile(label, figures, detail) {
+/**
+ * Outstanding as the headline, with a progress bar and "Paid X of Y".
+ *
+ * `detail` sits under the headline and must therefore describe the SAME
+ * figure: a note reading "incl. $4,497.40 sole trader" under a $4,287.02
+ * headline says the sole-trader part is bigger than the whole, because the
+ * two were measured against different things. Anything about the paid or
+ * allocated figures goes in `footnote`, next to them.
+ */
+function owedTile(label, figures, detail, footnote) {
   return '<div class="mini-tile mini-tile--split">' +
     '<span class="mini-tile__label">' + escapeHtml(label) + '</span>' +
     '<span class="mini-tile__value">' + formatCurrency(figures.outstanding || 0) + '</span>' +
@@ -300,6 +308,7 @@ function owedTile(label, figures, detail) {
       '<span>Paid ' + formatCurrency(figures.paid || 0) + '</span>' +
       '<span>of ' + formatCurrency(figures.allocated || 0) + '</span>' +
     '</div>' +
+    (footnote ? '<span class="mini-tile__note">' + escapeHtml(footnote) + '</span>' : '') +
   '</div>';
 }
 
@@ -311,7 +320,7 @@ function owedTile(label, figures, detail) {
  * is recorded here. `keys` is every registry key behind the box, which is more
  * than one wherever a company bucket merges with its sole-trader counterpart.
  */
-function payableTile(row, cats, hostId, detail) {
+function payableTile(row, cats, hostId, detail, footnote) {
   var figures = sumCats(cats, row.keys);
   var settle = row.settle || 'pay';
   var verb = settleShortVerb(settle);
@@ -325,7 +334,7 @@ function payableTile(row, cats, hostId, detail) {
         jsAttr(settle) + '\',' + (figures.outstanding || 0) + ')">' + escapeHtml(verb) + '</button>';
 
   return '<div class="tile-with-action">' +
-    owedTile(row.label, figures, detail) +
+    owedTile(row.label, figures, detail, footnote) +
     '<div class="tile-action">' + action + '</div>' +
   '</div>';
 }
@@ -365,6 +374,33 @@ function potAction(row, cats, hostId) {
     '</span>' +
     action +
   '</div>';
+}
+
+/**
+ * How much of what is STILL TO PAY came from the sole-trader years.
+ *
+ * Measured against outstanding, not against the allocated total, because it
+ * is printed under the outstanding headline. Measured against the total it
+ * could exceed the number directly above it, which is how this was first
+ * noticed: "$4,287.02 still to pay, incl. $4,497.40 sole trader".
+ */
+function soleTraderShare(cats, row) {
+  if (!row.legacyKeys) return 'still to pay';
+  var legacy = sumCats(cats, row.legacyKeys);
+  return legacy.outstanding > 0
+    ? 'incl. ' + formatCurrency(legacy.outstanding) + ' sole trader'
+    : 'still to pay';
+}
+
+/**
+ * Why Paid can be more than you have ever actually paid: the payer withheld
+ * some of it. Sits beside the paid figure, which is the one it explains.
+ */
+function withheldFootnote(cats, row) {
+  if (!row.withheldKeys) return '';
+  var withheld = sumCats(cats, row.withheldKeys);
+  if (withheld.allocated <= 0) return '';
+  return formatCurrency(withheld.allocated) + ' of the paid total was withheld at source';
 }
 
 /** Where a payment panel opens. One per section, filled on demand. */
@@ -495,20 +531,8 @@ function renderObligationsSection(cats) {
 
     var tiles = '<div class="flow-grid flow-grid--stack">' +
       rows.map(function(row) {
-        // Name the sole-trader portion when there is one, so a merged figure
-        // never looks like it all came from the company — and the withheld
-        // portion, which is why Paid can be more than you have ever paid.
-        var notes = [];
-        var legacy = row.legacyKeys ? sumCats(cats, row.legacyKeys) : null;
-        if (legacy && legacy.allocated > 0) {
-          notes.push('incl. ' + formatCurrency(legacy.allocated) + ' sole trader');
-        }
-        var withheld = row.withheldKeys ? sumCats(cats, row.withheldKeys) : null;
-        if (withheld && withheld.allocated > 0) {
-          notes.push(formatCurrency(withheld.allocated) + ' already withheld at source');
-        }
         return payableTile(row, cats, 'pay-host-obligations',
-          notes.length ? notes.join(' · ') : 'still to pay');
+          soleTraderShare(cats, row), withheldFootnote(cats, row));
       }).join('') +
     '</div>';
 
@@ -574,11 +598,9 @@ function renderAllocationsSection(cats) {
     formatCurrency(personalTotal.outstanding) + ' still to pay');
   html += '<div class="flow-grid">' +
     PERSONAL_ALLOCATIONS.map(function(row) {
-      var legacy = sumCats(cats, [row.keys[1]]);
-      var detail = legacy.allocated > 0
-        ? 'incl. ' + formatCurrency(legacy.allocated) + ' sole trader'
-        : 'still to pay';
-      return payableTile(row, cats, 'pay-host-allocations', detail);
+      // keys are [company, sole trader], so the second one is the legacy share.
+      return payableTile(row, cats, 'pay-host-allocations',
+        soleTraderShare(cats, { legacyKeys: [row.keys[1]] }));
     }).join('') +
   '</div>';
   html += payHost('pay-host-allocations');

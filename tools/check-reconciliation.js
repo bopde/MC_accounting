@@ -750,6 +750,96 @@ check('withheld tax raises Paid without raising what is owed', function() {
 });
 
 // =====================================================================
+// 5b. A box never claims a part bigger than its whole
+// =====================================================================
+
+section('No box says a part of it is bigger than the whole');
+
+/** Every mini-tile on the obligations and allocations sections, as rendered. */
+function renderedTiles(cats) {
+  const html = cli.renderObligationsSection(cats) + cli.renderAllocationsSection(cats);
+  return Array.from(html.matchAll(
+    /mini-tile__label">([^<]*)<[\s\S]*?mini-tile__value">([^<]*)<[\s\S]*?mini-tile__detail">([^<]*)</g))
+    .map(function(m) {
+      return {
+        label: m[1],
+        headline: r2(Number(m[2].replace(/[^0-9.-]/g, ''))),
+        detail: m[3],
+        incl: (function() {
+          const hit = /incl\. \$([\d,.]+)/.exec(m[3]);
+          return hit ? r2(Number(hit[1].replace(/,/g, ''))) : null;
+        })()
+      };
+    });
+}
+
+check('even when the sole-trader share is bigger than the balance owed', function() {
+  // The shape that exposed this on a real book: a large sole-trader invoice
+  // with heavy withholding, next to a small company one. The withheld tax is
+  // already paid, so the balance owed drops BELOW the sole-trader share of the
+  // total — and a note measured against the total then claims more is owed as
+  // a sole trader than is owed altogether.
+  build({
+    Businesses: [{ business_id: 'BIZ-001', name: 'Auckland Transport', currency: 'NZD', active: true }],
+    BudgetRules: [COMPANY_RULE, LEGACY_RULE],
+    Invoices: [
+      { invoice_id: 'AT0126', business_id: 'BIZ-001', date_from: '2026-01-31', date_to: '2026-01-31',
+        created_date: '2026-01-31', include_gst: false, gst_rate: 0, time_subtotal: 15000,
+        subtotal: 15000, gst_amount: 0, total: 15000, status: 'paid', budget_rule_id: '' },
+      { invoice_id: 'AT0226', business_id: 'BIZ-001', date_from: '2026-02-28', date_to: '2026-02-28',
+        created_date: '2026-02-28', include_gst: false, gst_rate: 0, time_subtotal: 1000,
+        subtotal: 1000, gst_amount: 0, total: 1000, status: 'paid', budget_rule_id: '' }
+    ]
+  });
+  app.allocateBudget('AT0126', 'BR-000');
+  app.allocateBudget('AT0226', 'BR-001');
+
+  const cats = cli.catByKey(app.getBudgetSummary(RANGE));
+  const row = cli.PERSONAL_OBLIGATIONS[0];
+  const box = cli.sumCats(cats, row.keys);
+  const legacy = cli.sumCats(cats, row.legacyKeys);
+
+  eq(legacy.allocated > box.outstanding, true,
+    'the scenario reproduces it: sole-trader total ' + r2(legacy.allocated) +
+    ' vs balance owed ' + r2(box.outstanding));
+
+  const tiles = renderedTiles(cats);
+  const tile = tiles.find(function(t) { return t.headline === r2(box.outstanding) && t.incl !== null; });
+  eq(!!tile, true, 'the personal tax box carries a sole-trader note');
+  exact(tile.incl, legacy.outstanding, 'the note is the sole-trader part of what is STILL OWED');
+  eq(tile.incl <= tile.headline, true,
+    'so it cannot exceed the headline (' + tile.incl + ' vs ' + tile.headline + ')');
+
+  // And the withheld money is explained beside the figure it inflates.
+  const html = cli.renderObligationsSection(cats);
+  eq(/of the paid total was withheld at source/.test(html), true,
+    'the withheld note appears, next to the paid figure');
+});
+
+check('across every box, after paying a slice of each', function() {
+  buildBook();
+  payAll();
+
+  const tiles = renderedTiles(cli.catByKey(app.getBudgetSummary(RANGE)));
+  eq(tiles.length >= 5, true, 'boxes rendered (got ' + tiles.length + ')');
+
+  const bad = tiles.filter(function(t) { return t.incl !== null && t.incl > t.headline + 0.005; })
+    .map(function(t) { return t.label + ': incl. ' + t.incl + ' > ' + t.headline; });
+  eq(bad.join('; '), '', 'boxes claiming a part bigger than the whole');
+});
+
+check('the groupings only ever name keys the box actually totals', function() {
+  // The note can only be a genuine subset if its keys are a subset. Nothing
+  // enforced that, so a future edit could name a key the box does not count.
+  cli.BIZ_OBLIGATIONS.concat(cli.PERSONAL_OBLIGATIONS).forEach(function(row) {
+    (row.legacyKeys || []).concat(row.withheldKeys || []).forEach(function(k) {
+      eq(row.keys.indexOf(k) !== -1, true,
+        row.label + ': "' + k + '" is named in a note but is not one of the box\'s keys');
+    });
+  });
+});
+
+// =====================================================================
 // 6. The invoice itself
 // =====================================================================
 
