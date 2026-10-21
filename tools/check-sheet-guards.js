@@ -22,8 +22,9 @@ const path = require('path');
 const vm = require('vm');
 
 const ROOT = path.resolve(__dirname, '..');
-const FILES = ['BudgetCategories.gs', 'BudgetService.gs', 'SheetService.gs', 'Setup.gs',
-  'IdService.gs', 'InvoiceService.gs', 'SettingsService.gs', 'ClientWrappers.gs'];
+const FILES = ['BudgetCategories.gs', 'BudgetService.gs', 'BusinessExpenseService.gs',
+  'SheetService.gs', 'Setup.gs', 'IdService.gs', 'InvoiceService.gs', 'SettingsService.gs',
+  'ClientWrappers.gs'];
 
 const source = FILES
   .map(function(f) { return fs.readFileSync(path.join(ROOT, 'src', 'server', f), 'utf8'); })

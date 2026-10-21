@@ -46,11 +46,14 @@
 // The bucket groupings both the Budget page and the Dashboard render from live
 // in utils.js.html, which is included first — see BIZ_OBLIGATIONS there.
 
+var BUDGET_TABS = ['summary', 'allocate', 'expenses'];
+
 function renderBudgetPage(container) {
   container.innerHTML =
     '<div class="tab-bar" id="budget-tabs">' +
       '<button type="button" class="active" onclick="showBudgetTab(\'summary\')">Money Flow</button>' +
       '<button type="button" onclick="showBudgetTab(\'allocate\')">Allocate Invoice</button>' +
+      '<button type="button" onclick="showBudgetTab(\'expenses\')">Business Expenses</button>' +
     '</div>' +
     '<div id="budget-tab-content"></div>';
 
@@ -58,16 +61,14 @@ function renderBudgetPage(container) {
 }
 
 function showBudgetTab(tab) {
-  var btns = document.querySelectorAll('#budget-tabs button');
-  btns.forEach(function(btn, i) {
-    btn.classList.toggle('active', (tab === 'summary' && i === 0) || (tab === 'allocate' && i === 1));
+  var index = BUDGET_TABS.indexOf(tab);
+  document.querySelectorAll('#budget-tabs button').forEach(function(btn, i) {
+    btn.classList.toggle('active', i === index);
   });
 
-  if (tab === 'summary') {
-    renderBudgetSummary();
-  } else {
-    renderBudgetAllocate();
-  }
+  if (tab === 'allocate') renderBudgetAllocate();
+  else if (tab === 'expenses') renderBusinessExpenses();
+  else renderBudgetSummary();
 }
 
 // --- Money Flow ---
@@ -126,7 +127,7 @@ function renderBudgetSummary() {
       renderMoneyMap(summary, cats) +
       renderRevenueSection(summary, cats) +
       renderObligationsSection(cats) +
-      renderIncomeSection(cats) +
+      renderIncomeSection(cats, summary) +
       renderAllocationsSection(cats) +
       renderHistorySection(summary, cats);
   }).catch(function(err) {
@@ -568,8 +569,11 @@ function renderObligationsSection(cats) {
 
 // --- Header 3: Total income ---
 
-function renderIncomeSection(cats) {
+function renderIncomeSection(cats, summary) {
   var reserve = catOf(cats, 'biz_reserve');
+  // Spending is not an allocation — it is what happened to the money after it
+  // was assigned — so it sits beside these figures rather than inside them.
+  var reserveSpent = ((summary && summary.potSpending) || {}).biz_reserve || 0;
 
   var companyKeys = PERSONAL_ALLOCATIONS.map(function(row) { return row.keys[0]; });
   var legacyKeys = PERSONAL_ALLOCATIONS.map(function(row) { return row.keys[1]; });
@@ -581,7 +585,8 @@ function renderIncomeSection(cats) {
     sectionTitle('Total income', reserve.allocated + personalPot, 'after obligations') +
     '<div class="pot-grid">' +
       bigTile('Business: Reserve pot', reserve.allocated,
-        formatCurrency(reserve.paid) + ' paid · ' + formatCurrency(reserve.outstanding) + ' still to pay') +
+        formatCurrency(reserve.paid) + ' paid in · ' + formatCurrency(reserveSpent) + ' spent · ' +
+        formatCurrency(round2Client(reserve.paid - reserveSpent)) + ' left in the pot') +
       bigTile('Personal: Personal pot', personalPot,
         'from business ' + formatCurrency(fromBusiness.allocated) +
         ' · sole trader ' + formatCurrency(fromSoleTrader.allocated)) +
@@ -973,6 +978,221 @@ function sortInvoiceIds(a, b) {
   // Shorter suffix first: '' < 'a' < 'z' < 'aa'
   if (pa.suffix.length !== pb.suffix.length) return pa.suffix.length - pb.suffix.length;
   return pa.suffix.localeCompare(pb.suffix);
+}
+
+// --- Business Expenses ---
+
+/**
+ * What the company spent on itself, and what is left in the pot it came from.
+ *
+ * Separate from Hours > Expenses, which is client-rebillable: those get billed
+ * on and never touch the budget. These are billed to nobody and are spent OUT
+ * of a pot the cascade filled, so what matters here is the balance.
+ */
+var BusinessExpenseEdit = null;
+
+function renderBusinessExpenses() {
+  var content = document.getElementById('budget-tab-content');
+
+  var existingFrom = document.getElementById('be-filter-from');
+  var existingTo = document.getElementById('be-filter-to');
+  if (existingFrom && existingTo) {
+    BudgetRange = { from: existingFrom.value, to: existingTo.value };
+  } else {
+    var range = datePreset('ytd');
+    BudgetRange = { from: range.from, to: range.to };
+  }
+
+  content.innerHTML =
+    '<div class="filters">' +
+      buildDateFilters('be-filter-from', 'be-filter-to', BudgetRange.from, BudgetRange.to) +
+      '<button type="button" class="btn-subtle" onclick="renderBusinessExpenses()">Apply</button>' +
+    '</div>' +
+    '<p class="muted small" style="margin:-0.5rem 0 0.5rem;">Default: this year</p>' +
+    '<div id="be-body" aria-busy="true">Loading...</div>';
+
+  serverCall('getBusinessExpenseView', { dateFrom: BudgetRange.from, dateTo: BudgetRange.to })
+    .then(function(view) {
+      var body = document.getElementById('be-body');
+      if (!body) return;
+      body.innerHTML = renderPotBalances(view.pots) +
+        renderBusinessExpenseForm(view) +
+        renderBusinessExpenseList(view.expenses);
+    }).catch(function(err) {
+      var body = document.getElementById('be-body');
+      if (body) body.innerHTML = '<p class="error">Error: ' + escapeHtml(err.message) + '</p>';
+    });
+}
+
+/**
+ * The pot as a ledger. "Paid in" is what has actually been moved, not what was
+ * allocated — an allocation you have not acted on is not money you can spend.
+ */
+function renderPotBalances(pots) {
+  if (!pots || !pots.length) {
+    return '<article class="empty-state"><h3>No pot to spend from</h3>' +
+      '<p class="muted">Business expenses come out of the Reserve. Allocate an invoice first.</p></article>';
+  }
+
+  return '<section class="flow-group">' +
+    '<h3 class="flow-group__title">Pot balance ' +
+      '<span class="muted small">in the dates selected</span></h3>' +
+    '<div class="flow-grid">' +
+      pots.map(function(pot) {
+        // A pot CAN go overdrawn — you really did incur the cost — but "-$3,099
+        // left to spend" is not a thing anyone says. Shown as what it is.
+        var over = pot.balance < -0.004;
+        return '<div class="mini-tile mini-tile--split">' +
+          '<span class="mini-tile__label">' + escapeHtml(pot.label) + '</span>' +
+          '<span class="mini-tile__value">' +
+            formatCurrency(over ? -pot.balance : pot.balance) + '</span>' +
+          '<span class="mini-tile__detail">' +
+            (over ? 'overdrawn — spent more than has been moved in' : 'left to spend') +
+          '</span>' +
+          '<div class="mini-tile__bar">' +
+            '<div class="mini-tile__bar-paid" style="width:' + pctOf(pot.spent, pot.paidIn) + '"></div>' +
+          '</div>' +
+          '<div class="mini-tile__split">' +
+            '<span>Spent ' + formatCurrency(pot.spent) + '</span>' +
+            '<span>of ' + formatCurrency(pot.paidIn) + ' paid in</span>' +
+          '</div>' +
+          (pot.stillToMoveIn > 0.004
+            ? '<span class="mini-tile__note">' + formatCurrency(pot.stillToMoveIn) +
+              ' more allocated but not yet moved in</span>'
+            : '') +
+        '</div>';
+      }).join('') +
+    '</div>' +
+  '</section>';
+}
+
+function renderBusinessExpenseForm(view) {
+  var editing = BusinessExpenseEdit;
+  var pots = view.pots || [];
+  var potOptions = pots.map(function(p) {
+    return { id: p.key, label: p.label };
+  });
+
+  return '<section class="flow-group">' +
+    '<h3 class="flow-group__title">' +
+      (editing ? 'Edit expense' : 'Record a business expense') + '</h3>' +
+    '<form id="be-form" class="form-card" onsubmit="submitBusinessExpense(event)">' +
+      '<div class="form-row">' +
+        '<label>Date <input type="date" id="be-date" required value="' +
+          escapeHtml(editing ? editing.date : todayStr()) + '"></label>' +
+        '<label>Amount <input type="number" id="be-amount" step="0.01" min="0.01" required value="' +
+          escapeHtml(editing ? String(editing.amount) : '') + '"></label>' +
+        '<label>Paid from ' +
+          buildSelect('be-pot', potOptions, 'id', 'label',
+            { required: true, placeholder: false,
+              selected: editing ? editing.paid_from : (pots[0] && pots[0].key) }) +
+        '</label>' +
+      '</div>' +
+      '<div class="form-row">' +
+        '<label>Description <input type="text" id="be-description" required placeholder="e.g. Xero subscription" value="' +
+          escapeHtml(editing ? editing.description : '') + '"></label>' +
+        '<label>Category <input type="text" id="be-category" list="be-category-list" placeholder="e.g. Software" value="' +
+          escapeHtml(editing ? editing.category : '') + '"></label>' +
+      '</div>' +
+      '<datalist id="be-category-list">' +
+        (view.categories || []).map(function(c) {
+          return '<option value="' + escapeHtml(c) + '"></option>';
+        }).join('') +
+      '</datalist>' +
+      '<label>Note (optional) <input type="text" id="be-notes" value="' +
+        escapeHtml(editing ? editing.notes : '') + '"></label>' +
+      '<div class="form-actions">' +
+        '<button type="submit" class="btn-primary">' +
+          (editing ? 'Save changes' : 'Record expense') + '</button>' +
+        (editing
+          ? '<button type="button" class="btn-subtle" onclick="cancelBusinessExpenseEdit()">Cancel</button>'
+          : '') +
+      '</div>' +
+    '</form>' +
+  '</section>';
+}
+
+function renderBusinessExpenseList(expenses) {
+  var html = '<section class="flow-group">' +
+    sectionTitle('Spent', (expenses || []).reduce(function(s, e) { return s + e.amount; }, 0),
+      'in the dates selected');
+
+  if (!expenses || !expenses.length) {
+    return html + '<p class="muted">Nothing recorded in this range yet.</p></section>';
+  }
+
+  html += '<div class="scroll-x"><table class="data-table data-table--compact">' +
+    '<thead><tr><th>Date</th><th>Description</th><th>Category</th>' +
+    '<th>From</th><th class="number">Amount</th><th>Note</th><th></th></tr></thead><tbody>';
+
+  expenses.forEach(function(e) {
+    html += '<tr>' +
+      '<td>' + (e.date ? formatDate(e.date) : '<span class="muted">—</span>') + '</td>' +
+      '<td>' + escapeHtml(e.description) + '</td>' +
+      '<td>' + (e.category ? escapeHtml(e.category) : '<span class="muted">—</span>') + '</td>' +
+      '<td><span class="pot-tag pot-tag--business">' + escapeHtml(e.paid_from_label) + '</span></td>' +
+      '<td class="number">' + formatCurrency(e.amount) + '</td>' +
+      '<td>' + (e.notes ? escapeHtml(e.notes) : '<span class="muted">—</span>') + '</td>' +
+      '<td class="actions">' +
+        '<button type="button" class="btn-small" onclick="editBusinessExpense(\'' +
+          jsAttr(e.expense_id) + '\')">Edit</button> ' +
+        '<button type="button" class="btn-small btn-subtle" onclick="deleteBusinessExpenseRow(\'' +
+          jsAttr(e.expense_id) + '\')">Delete</button>' +
+      '</td>' +
+    '</tr>';
+  });
+
+  return html + '</tbody></table></div></section>';
+}
+
+function submitBusinessExpense(event) {
+  if (event && event.preventDefault) event.preventDefault();
+
+  var data = {
+    date: document.getElementById('be-date').value,
+    amount: document.getElementById('be-amount').value,
+    paid_from: document.getElementById('be-pot').value,
+    description: document.getElementById('be-description').value,
+    category: document.getElementById('be-category').value,
+    notes: document.getElementById('be-notes').value
+  };
+
+  var editing = BusinessExpenseEdit;
+  if (editing) data.expense_id = editing.expense_id;
+
+  serverCall(editing ? 'updateBusinessExpense' : 'addBusinessExpense', data).then(function() {
+    showToast(editing ? 'Expense updated' : 'Expense recorded');
+    BusinessExpenseEdit = null;
+    App.invalidate(['budget', 'dashboard']);
+    renderBusinessExpenses();
+  }).catch(function(err) { showToast(err.message, 'error'); });
+}
+
+function editBusinessExpense(expenseId) {
+  serverCall('getBusinessExpenseView', { dateFrom: BudgetRange.from, dateTo: BudgetRange.to })
+    .then(function(view) {
+      var found = (view.expenses || []).find(function(e) {
+        return idsMatch(e.expense_id, expenseId);
+      });
+      if (!found) { showToast('Expense not found', 'error'); return; }
+      BusinessExpenseEdit = found;
+      renderBusinessExpenses();
+    }).catch(function(err) { showToast(err.message, 'error'); });
+}
+
+function cancelBusinessExpenseEdit() {
+  BusinessExpenseEdit = null;
+  renderBusinessExpenses();
+}
+
+function deleteBusinessExpenseRow(expenseId) {
+  if (!confirm('Delete this business expense? The pot balance goes back up by its amount.')) return;
+  serverCall('deleteBusinessExpense', expenseId).then(function() {
+    showToast('Expense deleted');
+    BusinessExpenseEdit = null;
+    App.invalidate(['budget', 'dashboard']);
+    renderBusinessExpenses();
+  }).catch(function(err) { showToast(err.message, 'error'); });
 }
 
 // --- Allocate Invoice ---

@@ -131,9 +131,10 @@ const app = {
   SpreadsheetApp: { getActiveSpreadsheet: function() { return app.__ss; } }
 };
 vm.createContext(app);
-vm.runInContext(['BudgetCategories.gs', 'BudgetService.gs', 'SheetService.gs', 'Setup.gs',
-  'IdService.gs', 'InvoiceService.gs', 'SettingsService.gs', 'ContractService.gs',
-  'HoursService.gs', 'DashboardService.gs', 'AccountService.gs', 'ClientWrappers.gs']
+vm.runInContext(['BudgetCategories.gs', 'BudgetService.gs', 'BusinessExpenseService.gs',
+  'SheetService.gs', 'Setup.gs', 'IdService.gs', 'InvoiceService.gs', 'SettingsService.gs',
+  'ContractService.gs', 'HoursService.gs', 'DashboardService.gs', 'AccountService.gs',
+  'ClientWrappers.gs']
   .map(function(f) { return fs.readFileSync(path.join(ROOT, 'src', 'server', f), 'utf8'); })
   .join('\n'), app, { filename: 'reconciliation.js' });
 

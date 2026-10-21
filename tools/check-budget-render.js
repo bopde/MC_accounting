@@ -28,7 +28,7 @@ const ROOT = path.resolve(__dirname, '..');
 
 const srv = { Logger: { log: function() {} } };
 vm.createContext(srv);
-vm.runInContext(['BudgetCategories.gs', 'BudgetService.gs']
+vm.runInContext(['BudgetCategories.gs', 'BudgetService.gs', 'BusinessExpenseService.gs']
   .map(function(f) { return fs.readFileSync(path.join(ROOT, 'src', 'server', f), 'utf8'); })
   .join('\n'), srv, { filename: 'budget-service.js' });
 

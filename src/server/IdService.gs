@@ -22,6 +22,7 @@ var ID_PREFIXES = {
   'Expenses': 'EXP',
   'BudgetAllocations': 'BA',
   'BudgetPayments': 'BP',
+  'BusinessExpenses': 'BE',
   'AccountSummaries': 'AS'
 };
 

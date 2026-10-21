@@ -25,9 +25,10 @@ const path = require('path');
 const vm = require('vm');
 
 const ROOT = path.resolve(__dirname, '..');
-const FILES = ['BudgetCategories.gs', 'BudgetService.gs', 'SheetService.gs', 'Setup.gs',
-  'IdService.gs', 'InvoiceService.gs', 'SettingsService.gs', 'ContractService.gs',
-  'HoursService.gs', 'DashboardService.gs', 'AccountService.gs', 'ClientWrappers.gs'];
+const FILES = ['BudgetCategories.gs', 'BudgetService.gs', 'BusinessExpenseService.gs',
+  'SheetService.gs', 'Setup.gs', 'IdService.gs', 'InvoiceService.gs', 'SettingsService.gs',
+  'ContractService.gs', 'HoursService.gs', 'DashboardService.gs', 'AccountService.gs',
+  'ClientWrappers.gs'];
 
 const source = FILES
   .map(function(f) { return fs.readFileSync(path.join(ROOT, 'src', 'server', f), 'utf8'); })
@@ -606,6 +607,155 @@ check('an id sent by the client cannot create a second row under it', function()
   app.addBusiness({ business_id: 'BIZ-001', name: 'Someone Else', currency: 'NZD' });
   const ids = app.getAll('Businesses').map(function(b) { return b.business_id; });
   eq(new Set(ids).size, ids.length, 'every business id is unique (' + ids.join(',') + ')');
+});
+
+// --- 8. Business expenses draw a pot down ---
+
+section('A business expense is spent out of a pot, and billed to nobody');
+
+function withReserve() {
+  build({
+    Businesses: [BUSINESS],
+    WorkCodes: [{ code_id: 'DEV', description: 'Development', category: 'billable', active: true }],
+    BudgetRules: [RULE],
+    TimeEntries: [entry('TE-001', '2026-05-04', 'DEV', 150, 80)]
+  });
+  app.generateInvoice({ businessId: 'BIZ-001', dateFrom: '2026-05-01', dateTo: '2026-05-31',
+    includeGst: false });
+  app.updateInvoiceStatus('AT0526', 'sent');
+  app.updateInvoiceStatus('AT0526', 'paid');
+  app.allocateBudget('AT0526', 'BR-001');
+}
+
+const YEAR = { dateFrom: '2026-01-01', dateTo: '2026-12-31' };
+
+check('the balance is what was moved IN, less what was spent', function() {
+  withReserve();
+  // 80h at 150 = 12,000 gross. Reserve is 10% of business income = 1,200.
+  const allocated = app.getBudgetSummary(YEAR);
+  const reserve = (function() {
+    let f = null;
+    (allocated.scopes || []).forEach(function(g) {
+      (g.categories || []).forEach(function(c) { if (c.key === 'biz_reserve') f = c; });
+    });
+    return f;
+  })();
+  near(reserve.allocated, 1200, 'allocated to reserve');
+
+  // Nothing moved in yet, so there is nothing to spend.
+  let view = app.getBusinessExpenseView(YEAR);
+  near(view.pots[0].paidIn, 0, 'paid in before moving anything');
+  near(view.pots[0].balance, 0, 'balance');
+  near(view.pots[0].stillToMoveIn, 1200, 'still to move in');
+
+  app.payBudgetCategories('biz_reserve', 1000, '2026-06-01', '', YEAR);
+  app.addBusinessExpense({ date: '2026-06-10', description: 'Laptop', category: 'Hardware',
+    amount: 2400, paid_from: 'biz_reserve' });
+  app.addBusinessExpense({ date: '2026-06-11', description: 'Xero', category: 'Software',
+    amount: 60, paid_from: 'biz_reserve' });
+
+  view = app.getBusinessExpenseView(YEAR);
+  near(view.pots[0].paidIn, 1000, 'paid in');
+  near(view.pots[0].spent, 2460, 'spent');
+  near(view.pots[0].balance, -1460, 'the pot can go overdrawn, and says so rather than hiding it');
+  eq(view.expenses.length, 2, 'both listed');
+  eq(view.expenses[0].description, 'Xero', 'newest first');
+});
+
+check('it never reaches an invoice, and never touches the allocations', function() {
+  withReserve();
+  const before = app.getBudgetSummary(YEAR).totals;
+
+  app.payBudgetCategories('biz_reserve', 500, '2026-06-01', '', YEAR);
+  app.addBusinessExpense({ date: '2026-06-10', description: 'Laptop', category: 'Hardware',
+    amount: 300, paid_from: 'biz_reserve' });
+
+  const after = app.getBudgetSummary(YEAR).totals;
+  eq(after.allocated, before.allocated, 'allocated is untouched by spending');
+  near(after.paid - before.paid, 500, 'only the payment moved it');
+
+  // The client-rebillable Expenses sheet is a different thing entirely.
+  eq(app.getAll('Expenses').length, 0, 'nothing was added to the rebillable sheet');
+  const free = app.getUninvoicedItemsInternal('BIZ-001', '2026-01-01', '2026-12-31', '');
+  eq(free.expenses.length, 0, 'and nothing is waiting to be billed to a client');
+});
+
+check('only a pot money is HELD in can be spent from', function() {
+  withReserve();
+  throws(function() {
+    app.addBusinessExpense({ date: '2026-06-10', description: 'x', amount: 10, paid_from: 'biz_tax' });
+  }, 'not a pot money can be spent from');
+  throws(function() {
+    app.addBusinessExpense({ date: '2026-06-10', description: 'x', amount: 10, paid_from: '' });
+  }, 'not a pot money can be spent from');
+});
+
+check('bad input is refused rather than written', function() {
+  withReserve();
+  throws(function() {
+    app.addBusinessExpense({ date: 'whenever', description: 'x', amount: 10, paid_from: 'biz_reserve' });
+  }, 'not a valid date');
+  throws(function() {
+    app.addBusinessExpense({ date: '2026-06-10', description: '', amount: 10, paid_from: 'biz_reserve' });
+  }, 'description');
+  throws(function() {
+    app.addBusinessExpense({ date: '2026-06-10', description: 'x', amount: 0, paid_from: 'biz_reserve' });
+  }, 'positive number');
+  eq(app.getAll('BusinessExpenses').length, 0, 'nothing was written');
+});
+
+check('editing and deleting move the balance back', function() {
+  withReserve();
+  app.payBudgetCategories('biz_reserve', 1000, '2026-06-01', '', YEAR);
+  const added = app.addBusinessExpense({ date: '2026-06-10', description: 'Laptop',
+    category: 'Hardware', amount: 300, paid_from: 'biz_reserve' });
+  near(app.getBusinessExpenseView(YEAR).pots[0].balance, 700, 'after recording');
+
+  app.updateBusinessExpense({ expense_id: added.expense_id, date: '2026-06-10',
+    description: 'Laptop (refurb)', category: 'Hardware', amount: 180, paid_from: 'biz_reserve' });
+  near(app.getBusinessExpenseView(YEAR).pots[0].balance, 820, 'after correcting the amount');
+
+  app.deleteBusinessExpense(added.expense_id);
+  near(app.getBusinessExpenseView(YEAR).pots[0].balance, 1000, 'after deleting it');
+  eq(app.getBusinessExpenses(YEAR).length, 0, 'and it is gone from the list');
+});
+
+check('spending is filtered on its own date, not on an invoice', function() {
+  withReserve();
+  app.payBudgetCategories('biz_reserve', 1000, '2026-06-01', '', YEAR);
+  app.addBusinessExpense({ date: '2026-06-10', description: 'In range', amount: 100,
+    paid_from: 'biz_reserve' });
+  app.addBusinessExpense({ date: '2026-11-20', description: 'Out of range', amount: 50,
+    paid_from: 'biz_reserve' });
+
+  const narrow = app.getBusinessExpenseView({ dateFrom: '2026-06-01', dateTo: '2026-06-30' });
+  near(narrow.pots[0].spent, 100, 'only June spending');
+  eq(narrow.expenses.length, 1, 'only June listed');
+  near(app.getBusinessExpenseView(YEAR).pots[0].spent, 150, 'both over the year');
+});
+
+check('the Money Flow summary carries the spend so the pot can show a balance', function() {
+  withReserve();
+  app.payBudgetCategories('biz_reserve', 1000, '2026-06-01', '', YEAR);
+  app.addBusinessExpense({ date: '2026-06-10', description: 'Laptop', amount: 300,
+    paid_from: 'biz_reserve' });
+  near(app.getBudgetSummary(YEAR).potSpending.biz_reserve, 300, 'reported on the summary');
+});
+
+check('an un-migrated spreadsheet is told so rather than failing obscurely', function() {
+  withReserve();
+  const realGetAll = app.getAll;
+  app.getAll = function(name) {
+    if (name === 'BusinessExpenses') throw new Error('Sheet not found: BusinessExpenses');
+    return realGetAll(name);
+  };
+  throws(function() {
+    app.addBusinessExpense({ date: '2026-06-10', description: 'x', amount: 10,
+      paid_from: 'biz_reserve' });
+  }, 'BusinessExpenses sheet');
+  // And the pages that merely READ it still render.
+  eq(app.getBudgetSummary(YEAR).totals.allocated > 0, true, 'the budget page survives');
+  app.getAll = realGetAll;
 });
 
 console.log('\n' + passes + ' passed, ' + failures + ' failed');

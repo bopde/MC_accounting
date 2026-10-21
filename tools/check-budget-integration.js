@@ -22,7 +22,7 @@ const vm = require('vm');
 
 const ROOT = path.resolve(__dirname, '..');
 
-const source = ['BudgetCategories.gs', 'BudgetService.gs']
+const source = ['BudgetCategories.gs', 'BudgetService.gs', 'BusinessExpenseService.gs']
   .map(function(f) { return fs.readFileSync(path.join(ROOT, 'src', 'server', f), 'utf8'); })
   .join('\n');
 

@@ -860,7 +860,11 @@ function getBudgetSummary(params) {
     bridge: bridge,
     accountHoldings: accountHoldings,
     totals: totals,
-    payments: budgetPaymentHistory(inRangeAllocations, isFiltered)
+    payments: budgetPaymentHistory(inRangeAllocations, isFiltered),
+    // What has been spent OUT of each pot (BusinessExpenseService). Reported
+    // alongside rather than folded in: an operating cost is not an allocation,
+    // and every identity above it is about money being assigned, not spent.
+    potSpending: potSpending(params)
   };
 }
 

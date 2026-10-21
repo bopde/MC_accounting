@@ -18,7 +18,7 @@ const path = require('path');
 const vm = require('vm');
 
 const ROOT = path.resolve(__dirname, '..');
-const FILES = ['BudgetCategories.gs', 'BudgetService.gs'];
+const FILES = ['BudgetCategories.gs', 'BudgetService.gs', 'BusinessExpenseService.gs'];
 
 const source = FILES
   .map(function(f) { return fs.readFileSync(path.join(ROOT, 'src', 'server', f), 'utf8'); })

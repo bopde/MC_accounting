@@ -95,6 +95,15 @@ function sheetSchemas() {
       'payment_id', 'payment_date', 'category_key', 'category', 'scope',
       'amount', 'notes', 'covered', 'created_date'
     ],
+    // Company operating costs — software, hardware, accounting fees. Nothing
+    // to do with the client-rebillable Expenses sheet: these are billed to
+    // nobody and are spent OUT of a pot that allocations have filled.
+    // `paid_from` is a budget category key, so the same ledger works for any
+    // pot money is held in, not just the Reserve.
+    'BusinessExpenses': [
+      'expense_id', 'date', 'description', 'category', 'amount',
+      'paid_from', 'notes', 'created_date'
+    ],
     'AccountSummaries': [
       'summary_id', 'account_id', 'month', 'ending_balance',
       'realised_gains', 'unrealised_gains', 'tax_paid',

@@ -228,6 +228,17 @@ const RESPONSES = {
   },
   getUninvoicedItems: { timeEntries: [TIME_ENTRY], expenses: [EXPENSE] },
   getBudgetSummary: budgetSummaryFixture(),
+  getBusinessExpenseView: {
+    pots: [{ key: 'biz_reserve', label: 'Reserve', allocated: 500, paidIn: 400,
+      stillToMoveIn: 100, spent: 120, balance: 280 }],
+    categories: ['Software', 'Hardware', 'Accounting & legal'],
+    expenses: [{ expense_id: 'BE-001', date: '2026-05-04', description: 'Xero subscription',
+      category: 'Software', amount: 120, paid_from: 'biz_reserve',
+      paid_from_label: 'Reserve', notes: 'Annual' }]
+  },
+  addBusinessExpense: { expense_id: 'BE-002' },
+  updateBusinessExpense: { expense_id: 'BE-001' },
+  deleteBusinessExpense: { success: true },
   payBudgetCategoriesFromClient: { payment_id: 'BP-002', amount: 400,
     category: 'Business Tax', allocations: 1 },
   undoBudgetPaymentFromClient: { success: true, amount: 750, category: 'GST' },
@@ -382,6 +393,7 @@ async function drive(label, fn) {
   await drive('invoices > list', function() { cli.showInvoiceTab('list'); });
   await drive('budget > allocate', function() { cli.showBudgetTab('allocate'); });
   await drive('budget > money flow', function() { cli.showBudgetTab('summary'); });
+  await drive('budget > business expenses', function() { cli.showBudgetTab('expenses'); });
   for (const tab of ['mydetails', 'businesses', 'contracts', 'codes', 'accounts', 'rules']) {
     await drive('settings > ' + tab, function() { cli.showSettingsTab(tab); });
   }
@@ -497,6 +509,43 @@ async function drive(label, fn) {
     JSON.stringify(lastPayment()));
 
   cli.closePayPanel();
+
+  console.log('\nBusiness expenses');
+  await drive('record one', function() {
+    cli.showBudgetTab('expenses');
+    doc.getElementById('be-date').value = '2026-05-10';
+    doc.getElementById('be-amount').value = '240.50';
+    doc.getElementById('be-pot').value = 'biz_reserve';
+    doc.getElementById('be-description').value = 'Laptop';
+    doc.getElementById('be-category').value = 'Hardware';
+    cli.submitBusinessExpense({ preventDefault: function() {} });
+  });
+  check('it is sent as an object, not a pipe string', (function() {
+    for (let i = calls.length - 1; i >= 0; i--) {
+      if (calls[i].name === 'addBusinessExpense') {
+        const a = calls[i].args;
+        return a && a.description === 'Laptop' && a.paid_from === 'biz_reserve' &&
+          a.amount === '240.50';
+      }
+    }
+    return false;
+  })());
+  await drive('edit one', function() { cli.editBusinessExpense('BE-001'); });
+  check('editing loads the row into the form', !!cli.BusinessExpenseEdit &&
+    cli.BusinessExpenseEdit.description === 'Xero subscription');
+  await drive('save the edit', function() {
+    cli.submitBusinessExpense({ preventDefault: function() {} });
+  });
+  await drive('cancel an edit', function() { cli.cancelBusinessExpenseEdit(); });
+  await drive('delete one', function() { cli.deleteBusinessExpenseRow('BE-001'); });
+  check('a healthy pot says what is left to spend',
+    cli.renderPotBalances([{ key: 'biz_reserve', label: 'Reserve', allocated: 500,
+      paidIn: 400, stillToMoveIn: 100, spent: 120, balance: 280 }]).indexOf('left to spend') !== -1);
+  const overdrawn = cli.renderPotBalances([{ key: 'biz_reserve', label: 'Reserve', allocated: 500,
+    paidIn: 400, stillToMoveIn: 0, spent: 700, balance: -300 }]);
+  check('an overdrawn pot says that, without a negative headline',
+    /mini-tile__value">\$300\.00/.test(overdrawn) && overdrawn.indexOf('overdrawn') !== -1 &&
+    overdrawn.indexOf('-$') === -1, overdrawn.slice(0, 260));
 
   doc.getElementById('inv-business').value = 'BIZ-001';
   doc.getElementById('inv-from').value = '2026-05-01';
