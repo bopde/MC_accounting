@@ -360,6 +360,10 @@ check('every invoice allocates exactly its billed hours plus GST', function() {
   app.getAll('BudgetAllocations').forEach(function(a) {
     const def = app.getCategoryDef(app.resolveCategoryKey(a));
     if (def && def.isTransfer) return;
+    // Corrections and credits are filed against an invoice so a date filter
+    // cannot lose them, but they are facts about a BUCKET. An invoice's own
+    // lines go on summing to what it billed however much is later paid.
+    if (!app.isCascadeLine(a)) return;
     const k = String(a.invoice_id);
     byInvoice[k] = r2((byInvoice[k] || 0) + (Number(a.amount) || 0));
   });
@@ -375,6 +379,7 @@ check('expenses are billed to the client but never allocated', function() {
   const allocated = r2(app.getAll('BudgetAllocations').reduce(function(s, a) {
     const def = app.getCategoryDef(app.resolveCategoryKey(a));
     if (def && def.isTransfer) return s;
+    if (!app.isCascadeLine(a)) return s;
     return s + (Number(a.amount) || 0);
   }, 0));
   const invoiced = r2(app.getAll('Invoices').reduce(function(s, i) { return s + Number(i.total); }, 0));
@@ -573,6 +578,103 @@ check('paying every bucket to the cent leaves nothing outstanding and nothing ov
   const after = app.getBudgetSummary(RANGE).totals;
   exact(after.outstanding, 0, 'outstanding after paying everything');
   exact(after.paid, after.allocated, 'paid equals allocated');
+});
+
+// =====================================================================
+// 3b. Paying more than is owed
+// =====================================================================
+
+section('A surplus goes exactly where the person said it should');
+
+/** One bucket out of the current summary. */
+function bucket(sum, key) {
+  let found = null;
+  (sum.scopes || []).forEach(function(g) {
+    (g.categories || []).forEach(function(c) { if (c.key === key) found = c; });
+  });
+  return found || { allocated: 0, paid: 0, outstanding: 0, items: [] };
+}
+
+check('an overpayment leaves what was owed alone and holds the rest as credit', function() {
+  buildBook();
+  const before = app.getBudgetSummary(RANGE).totals;
+  const owed = bucket(app.getBudgetSummary(RANGE), 'biz_acc').outstanding;
+
+  app.payBudgetCategories('biz_acc', r2(owed + 40), '2026-08-01', '', RANGE, 'overpay');
+  const after = app.getBudgetSummary(RANGE).totals;
+
+  exact(after.allocated, before.allocated, 'nothing new is owed');
+  exact(after.paid - before.paid, owed + 40, 'all of it counts as paid');
+  exact(after.outstanding, before.outstanding - owed - 40, 'and the balance carries the credit');
+  exact(after.allocated, after.paid + after.outstanding, 'allocated = paid + outstanding still holds');
+});
+
+check('a correction raises what was owed by exactly the surplus', function() {
+  buildBook();
+  const before = app.getBudgetSummary(RANGE).totals;
+  const owed = bucket(app.getBudgetSummary(RANGE), 'biz_acc').outstanding;
+
+  app.payBudgetCategories('biz_acc', r2(owed + 40), '2026-08-01', '', RANGE, 'correct');
+  const after = app.getBudgetSummary(RANGE).totals;
+
+  exact(after.allocated - before.allocated, 40, 'what is owed rises by the surplus');
+  exact(after.paid - before.paid, owed + 40, 'and all of it is paid');
+  exact(after.outstanding, before.outstanding - owed, 'leaving nothing extra outstanding');
+  exact(after.allocated, after.paid + after.outstanding, 'allocated = paid + outstanding still holds');
+});
+
+check('either way, every paid dollar is still a payment or was withheld', function() {
+  buildBook();
+  const withheldBefore = paidTotals().withheld;
+  const owed = bucket(app.getBudgetSummary(RANGE), 'biz_acc').outstanding;
+
+  app.payBudgetCategories('biz_acc', r2(owed + 40), '2026-08-01', '', RANGE, 'overpay');
+  app.payBudgetCategories('biz_tax', 25, '2026-08-02', '', RANGE, 'refuse');
+  exact(paidTotals().paid, withheldBefore + paymentsTotal(), 'after an overpayment');
+
+  buildBook();
+  const owed2 = bucket(app.getBudgetSummary(RANGE), 'biz_acc').outstanding;
+  app.payBudgetCategories('biz_acc', r2(owed2 + 40), '2026-08-01', '', RANGE, 'correct');
+  exact(paidTotals().paid, paidTotals().withheld + paymentsTotal(), 'after a correction');
+});
+
+check('an invoice still accounts for exactly what it billed, after both', function() {
+  buildBook();
+  const owed = bucket(app.getBudgetSummary(RANGE), 'biz_acc').outstanding;
+  app.payBudgetCategories('biz_acc', r2(owed + 40), '2026-08-01', '', RANGE, 'overpay');
+  app.payBudgetCategories('biz_tax', r2(bucket(app.getBudgetSummary(RANGE), 'biz_tax').outstanding + 15),
+    '2026-08-02', '', RANGE, 'correct');
+
+  const byInvoice = {};
+  app.getAll('BudgetAllocations').forEach(function(a) {
+    const def = app.getCategoryDef(app.resolveCategoryKey(a));
+    if ((def && def.isTransfer) || !app.isCascadeLine(a)) return;
+    const k = String(a.invoice_id);
+    byInvoice[k] = r2((byInvoice[k] || 0) + (Number(a.amount) || 0));
+  });
+  BOOK.forEach(function(b) {
+    exact(byInvoice[b.id], r2(b.time + (b.gst ? r2(b.time * 0.15) : 0)), b.id);
+  });
+});
+
+check('undoing either one puts the book back exactly', function() {
+  buildBook();
+  const before = app.getBudgetSummary(RANGE).totals;
+  const owed = bucket(app.getBudgetSummary(RANGE), 'biz_acc').outstanding;
+
+  ['overpay', 'correct'].forEach(function(mode) {
+    const result = app.payBudgetCategories('biz_acc', r2(owed + 40), '2026-08-01', '', RANGE, mode);
+    app.undoBudgetPayment(result.payment_id);
+    const after = app.getBudgetSummary(RANGE).totals;
+    exact(after.allocated, before.allocated, mode + ': allocated');
+    exact(after.paid, before.paid, mode + ': paid');
+    exact(after.outstanding, before.outstanding, mode + ': outstanding');
+  });
+
+  const leftovers = app.getAll('BudgetAllocations').filter(function(a) {
+    return !app.isCascadeLine(a);
+  });
+  eq(leftovers.length, 0, 'no credit or correction rows are left behind');
 });
 
 // =====================================================================

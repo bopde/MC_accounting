@@ -76,9 +76,16 @@ function sheetSchemas() {
     // payment need not settle a whole allocation. `status` is kept in step
     // ('paid' once paid_amount covers amount) for rows written before it
     // existed, where a blank paid_amount means "status is the whole truth".
+    // `entry_type` separates the cascade's own lines from the two kinds of row
+    // a payment can add when it comes to more than was outstanding:
+    //   ''           a line the allocation cascade wrote
+    //   'adjustment' you owed more than was allocated — raises what is owed
+    //   'credit'     you paid more than you owed — held against future
+    //                allocations to the same bucket
     'BudgetAllocations': [
       'allocation_id', 'invoice_id', 'category', 'category_key', 'scope',
-      'percentage', 'amount', 'status', 'paid_amount', 'transfer_date', 'notes'
+      'percentage', 'amount', 'status', 'paid_amount', 'entry_type',
+      'transfer_date', 'notes'
     ],
     // One row per payment made against a budget category. `covered` records
     // exactly which allocations the money was applied to and how much each

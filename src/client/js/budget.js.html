@@ -299,7 +299,8 @@ function bigTile(label, amount, detail) {
 function owedTile(label, figures, detail, footnote) {
   return '<div class="mini-tile mini-tile--split">' +
     '<span class="mini-tile__label">' + escapeHtml(label) + '</span>' +
-    '<span class="mini-tile__value">' + formatCurrency(figures.outstanding || 0) + '</span>' +
+    '<span class="mini-tile__value">' +
+      formatCurrency(Math.max(0, figures.outstanding || 0)) + '</span>' +
     '<span class="mini-tile__detail">' + escapeHtml(detail || 'still to pay') + '</span>' +
     '<div class="mini-tile__bar">' +
       '<div class="mini-tile__bar-paid" style="width:' + pctOf(figures.paid, figures.allocated) + '"></div>' +
@@ -326,15 +327,24 @@ function payableTile(row, cats, hostId, detail, footnote) {
   var verb = settleShortVerb(settle);
   var keys = payableKeys(row.keys).join(',');
 
+  var credit = figures.outstanding < -0.004 ? round2Client(-figures.outstanding) : 0;
   var settled = figures.allocated > 0 && figures.outstanding <= 0.004;
-  var action = settled
-    ? '<span class="tile-action__done">paid in full</span>'
-    : '<button type="button" class="btn-small btn-primary" onclick="openPayPanel(\'' +
-        jsAttr(hostId) + '\',\'' + jsAttr(keys) + '\',\'' + jsAttr(row.label) + '\',\'' +
-        jsAttr(settle) + '\',' + (figures.outstanding || 0) + ')">' + escapeHtml(verb) + '</button>';
+
+  // An overpaid bucket still takes a payment — there may be more to pay once
+  // the next invoice is allocated — but it says what it is holding rather than
+  // offering a cheerful "paid in full" over money that went out too early.
+  var action = credit > 0
+    ? '<span class="tile-action__credit">' + formatCurrency(credit) + ' in credit</span>'
+    : settled
+      ? '<span class="tile-action__done">paid in full</span>'
+      : '<button type="button" class="btn-small btn-primary" onclick="openPayPanel(\'' +
+          jsAttr(hostId) + '\',\'' + jsAttr(keys) + '\',\'' + jsAttr(row.label) + '\',\'' +
+          jsAttr(settle) + '\',' + (figures.outstanding || 0) + ')">' + escapeHtml(verb) + '</button>';
 
   return '<div class="tile-with-action">' +
-    owedTile(row.label, figures, detail, footnote) +
+    owedTile(row.label, figures,
+      credit > 0 ? 'nothing owed — ' + formatCurrency(credit) + ' in credit' : detail,
+      footnote) +
     '<div class="tile-action">' + action + '</div>' +
   '</div>';
 }
@@ -410,8 +420,13 @@ function payHost(id) {
 
 function pctOf(part, total) {
   if (!total || total === 0) return '0%';
-  return ((Number(part) / Number(total)) * 100).toFixed(0) + '%';
+  // Capped: an overpaid bucket is more than 100% paid, and a bar wider than
+  // its track escapes the tile.
+  var pct = (Number(part) / Number(total)) * 100;
+  return Math.max(0, Math.min(100, pct)).toFixed(0) + '%';
 }
+
+function round2Client(n) { return Math.round(Number(n) * 100) / 100; }
 
 /** A half-width column with its own subheader and subtotal. */
 function subCard(label, amount, amountNote, inner) {
@@ -639,7 +654,8 @@ function openPayPanel(hostId, keys, label, settle, outstanding) {
       '</header>' +
       '<div class="pay-panel__fields">' +
         '<label>Amount' +
-          '<input type="number" id="pay-amount" step="0.01" min="0.01" value="' + amount + '">' +
+          '<input type="number" id="pay-amount" step="0.01" min="0.01" value="' + amount +
+            '" oninput="onPayAmountChanged()">' +
         '</label>' +
         '<label>Date' +
           '<input type="date" id="pay-date" value="' + todayStr() + '">' +
@@ -656,12 +672,74 @@ function openPayPanel(hostId, keys, label, settle, outstanding) {
         '<button type="button" class="btn-small btn-primary" onclick="submitPayment()">Record ' +
           escapeHtml(settleNoun(settle)) + '</button>' +
       '</div>' +
+      surplusChoiceMarkup() +
       '<p class="muted small pay-panel__note">Applied to the oldest unpaid invoices in this ' +
         'bucket first. Anything less than the full amount leaves the rest outstanding.</p>' +
     '</article>';
 
   var input = document.getElementById('pay-amount');
   if (input && input.focus) input.focus();
+}
+
+/**
+ * The question a payment bigger than the balance has to answer.
+ *
+ * Paying more than is outstanding used to be refused outright, which is wrong
+ * twice over: you can genuinely overpay, and you can discover the bill was
+ * bigger than the cascade had set aside. Those two need opposite treatment, and
+ * only the person recording it knows which happened — so it is asked, rather
+ * than guessed at from the numbers.
+ *
+ * Hidden until the amount actually exceeds the balance, so the ordinary case
+ * is untouched.
+ */
+function surplusChoiceMarkup() {
+  return '<div class="pay-panel__surplus" id="pay-surplus" hidden>' +
+    '<p class="pay-panel__surplus-lead" id="pay-surplus-lead"></p>' +
+    '<label class="pay-panel__choice">' +
+      '<input type="radio" name="pay-surplus-kind" id="pay-kind-overpay" checked> ' +
+      '<span><strong>Overpayment</strong> — I paid more than I owed. ' +
+      'Hold the extra as credit and work it off against the next allocations.</span>' +
+    '</label>' +
+    '<label class="pay-panel__choice">' +
+      '<input type="radio" name="pay-surplus-kind" id="pay-kind-correct"> ' +
+      '<span><strong>Correction</strong> — I owed more than was allocated. ' +
+      'Raise the amount owed to match what I actually paid.</span>' +
+    '</label>' +
+  '</div>';
+}
+
+/** Show or hide that question as the amount is typed. */
+function onPayAmountChanged() {
+  var block = document.getElementById('pay-surplus');
+  var lead = document.getElementById('pay-surplus-lead');
+  if (!block) return;
+
+  var surplus = round2Client(payPanelAmount() - BudgetPay.outstanding);
+  if (surplus > 0.004) {
+    block.hidden = false;
+    block.removeAttribute('hidden');
+    if (lead) {
+      lead.innerHTML = 'That is <strong>' + formatCurrency(surplus) + '</strong> more than the ' +
+        formatCurrency(BudgetPay.outstanding) + ' outstanding. Which is it?';
+    }
+  } else {
+    block.hidden = true;
+    block.setAttribute('hidden', 'hidden');
+  }
+}
+
+/** The amount as typed. A pasted "$1,234.50" is a reasonable thing to enter. */
+function payPanelAmount() {
+  var el = document.getElementById('pay-amount');
+  if (!el) return 0;
+  return Number(String(el.value).replace(/[^0-9.\-]/g, '')) || 0;
+}
+
+/** Which way the surplus should be treated, when there is one. */
+function payPanelSurplusMode() {
+  var correct = document.getElementById('pay-kind-correct');
+  return (correct && correct.checked) ? 'correct' : 'overpay';
 }
 
 function closePayPanel() {
@@ -675,23 +753,23 @@ function closePayPanel() {
 function payFullRemaining() {
   var input = document.getElementById('pay-amount');
   if (input) input.value = BudgetPay.outstanding.toFixed(2);
+  onPayAmountChanged();
 }
 
 function submitPayment() {
-  var amountEl = document.getElementById('pay-amount');
-  if (!amountEl || !BudgetPay.keys) return;
+  if (!document.getElementById('pay-amount') || !BudgetPay.keys) return;
 
-  // Strip anything that is not part of a number: a pasted "$1,234.50" is a
-  // perfectly reasonable thing to type into an amount box.
-  var amount = Number(String(amountEl.value).replace(/[^0-9.\-]/g, ''));
+  var amount = payPanelAmount();
   if (!(amount > 0)) {
     showToast('Enter an amount greater than zero.', 'error');
     return;
   }
-  if (amount - BudgetPay.outstanding > 0.005) {
-    showToast('That is more than the ' + formatCurrency(BudgetPay.outstanding) + ' outstanding.', 'error');
-    return;
-  }
+
+  // More than is outstanding is allowed now, but only with an answer to what
+  // it is. 'refuse' keeps the server's guard in place for the ordinary case,
+  // so a mistyped extra digit still cannot slip through unremarked.
+  var surplus = round2Client(amount - BudgetPay.outstanding);
+  var mode = surplus > 0.004 ? payPanelSurplusMode() : 'refuse';
 
   var dateEl = document.getElementById('pay-date');
   var noteEl = document.getElementById('pay-note');
@@ -704,11 +782,19 @@ function submitPayment() {
     (dateEl && dateEl.value) || todayStr(),
     BudgetRange.from || '',
     BudgetRange.to || '',
+    mode,
     (noteEl && noteEl.value) || ''
   ].join('|');
 
   serverCall('payBudgetCategoriesFromClient', params).then(function(result) {
-    showToast(formatCurrency(result && result.amount) + ' ' + noun + ' recorded — ' + BudgetPay.label);
+    var extra = '';
+    if (result && result.surplus > 0) {
+      extra = result.surplusMode === 'correct'
+        ? ' — ' + formatCurrency(result.surplus) + ' added to what was owed'
+        : ' — ' + formatCurrency(result.surplus) + ' held as credit';
+    }
+    showToast(formatCurrency(result && result.amount) + ' ' + noun + ' recorded — ' +
+      BudgetPay.label + extra);
     App.invalidate(['budget', 'dashboard']);
     renderBudgetSummary();
   }).catch(function(err) {

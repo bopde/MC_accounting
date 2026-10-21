@@ -558,6 +558,25 @@ check('every sheet in the schema can generate an id', function() {
   eq(missing.join(','), '', 'sheets with no ID prefix');
 });
 
+check('allocations are declared with the column that separates the row kinds', function() {
+  eq(app.sheetSchemas().BudgetAllocations.indexOf('entry_type') !== -1, true, 'entry_type declared');
+});
+
+check('a surplus row written against an un-migrated sheet throws rather than vanishing', function() {
+  app.__ss = makeSpreadsheet({
+    BudgetAllocations: makeSheet('BudgetAllocations', ALLOC_HEADERS, [])
+  });
+  // Without entry_type the row would be written as an ordinary allocation,
+  // and a credit indistinguishable from money genuinely owed.
+  throws(function() {
+    app.appendRow('BudgetAllocations', {
+      invoice_id: '0526', category: 'Business ACC', category_key: 'biz_acc',
+      scope: 'business', percentage: '', amount: 0, status: 'paid',
+      paid_amount: 30, entry_type: 'credit', transfer_date: '2026-06-01', notes: ''
+    });
+  }, 'entry_type');
+});
+
 check('payments are declared with the columns the service writes', function() {
   const columns = app.sheetSchemas().BudgetPayments || [];
   ['payment_id', 'payment_date', 'category_key', 'category', 'scope',

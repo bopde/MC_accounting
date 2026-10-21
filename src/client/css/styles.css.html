@@ -258,6 +258,7 @@
   }
   .badge-draft, .badge-pending, .badge-allocated { background: var(--warn-bg); color: var(--warn); }
   .badge-sent, .badge-transferred, .badge-info, .badge-part-paid { background: rgba(74,144,184,0.12); color: var(--tide); }
+  .badge-credit, .badge-correction                 { background: var(--warn-bg); color: var(--warn); }
   .badge-paid, .badge-reconciled                   { background: var(--success-bg); color: var(--success); }
   .badge-void                                      { background: rgba(13,46,74,0.06); color: var(--muted); }
 
@@ -486,6 +487,7 @@
   }
   .tile-action button { margin: 0; }
   .tile-action__done { font-size: 0.72rem; color: var(--success); font-weight: 500; }
+  .tile-action__credit { font-size: 0.72rem; color: var(--warn); font-weight: 500; }
 
   /* ---- The money map ---- */
   .money-map {
@@ -585,6 +587,25 @@
     margin-top: 0.7rem;
   }
   .pay-panel__spacer { flex: 1 1 auto; }
+  .pay-panel__surplus {
+    margin-top: 0.7rem;
+    padding: 0.6rem 0.75rem;
+    border-left: 3px solid var(--sand);
+    background: var(--warn-bg);
+    border-radius: 0 4px 4px 0;
+  }
+  .pay-panel__surplus[hidden] { display: none; }
+  .pay-panel__surplus-lead { margin: 0 0 0.4rem; font-size: 0.82rem; }
+  .pay-panel__choice {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.45rem;
+    font-size: 0.78rem;
+    margin: 0 0 0.3rem;
+    cursor: pointer;
+  }
+  .pay-panel__choice:last-child { margin-bottom: 0; }
+  .pay-panel__choice input { margin: 0.15rem 0 0; flex: none; }
   .pay-panel__note { margin: 0.5rem 0 0; }
 
   /* ---- Pot action bar: the button for a figure already shown above ---- */

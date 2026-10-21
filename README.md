@@ -33,7 +33,7 @@ A finance management web app built entirely on Google Apps Script with Google Sh
 - Generate invoices from uninvoiced time entries and expenses for a business and date range.
 - Optional GST at a configurable rate (default 15%). Record tax already withheld by the payer.
 - Optional **PO number**, defaulting from the selected contract but editable, and settable on an existing invoice via Edit.
-- Print-friendly invoice view with your details ("From"), client details ("Bill To"), itemised services grouped by work code, and expenses listed individually. Only the **GST number** is printed — the IRD number is kept in Settings for reference but stays off documents that go to clients.
+- Print-friendly invoice view with your details ("From"), client details ("Bill To"), itemised services grouped by work code, and expenses listed individually. **Services and expenses are always totalled separately** — expenses are recovered at cost and are not income, so no combined figure is shown without its two parts above it. Only the **GST number** is printed — the IRD number is kept in Settings for reference but stays off documents that go to clients.
 - Status flow: draft -> sent -> paid -> void.
 - Entries are marked with the invoice ID once invoiced, preventing double-billing.
 
@@ -189,7 +189,7 @@ The spreadsheet has **12 tabs**, created automatically by `setupSheets()`:
 | **TimeEntries** | Logged work hours | entry_id, business_id, date, time_start, time_end, hours, description, work_code, rate, line_total, invoice_id, contract_id |
 | **Expenses** | Reimbursable expenses | expense_id, business_id, date, amount, description, work_code, invoice_id |
 | **Invoices** | Generated invoices | invoice_id, business_id, date_from, date_to, created_date, include_gst, gst_rate, time_subtotal, subtotal, gst_amount, total, status, budget_rule_id, contract_id, po_number, description, notes, line_descriptions |
-| **BudgetAllocations** | Per-invoice budget splits | allocation_id, invoice_id, category, category_key, scope, percentage, amount, status, paid_amount, transfer_date, notes |
+| **BudgetAllocations** | Per-invoice budget splits | allocation_id, invoice_id, category, category_key, scope, percentage, amount, status, paid_amount, entry_type, transfer_date, notes |
 | **BudgetPayments** | Money actually moved, per payment | payment_id, payment_date, category_key, category, scope, amount, notes, covered, created_date |
 | **AccountSummaries** | Monthly account snapshots | summary_id, account_id, month, ending_balance, realised_gains, unrealised_gains, tax_paid, total_in, total_out, notes |
 
@@ -198,6 +198,8 @@ The spreadsheet has **12 tabs**, created automatically by `setupSheets()`:
 `paid_amount` is how much of an allocation has actually been paid, so a payment need not settle a whole allocation. `status` is kept in step (`paid` once `paid_amount` covers `amount`), and a **blank** `paid_amount` means the row predates partial payments — there, `status` is the whole truth.
 
 `BudgetPayments.covered` records exactly which allocations a payment was applied to and how much each got, as `BA-002:252;BA-003:18`, so a payment can be undone precisely rather than by re-deriving it.
+
+`entry_type` separates the cascade's own lines from the two kinds of row a payment can add when it comes to more than was outstanding — blank for a cascade line, `adjustment` for a correction, `credit` for an overpayment. Keeping them apart is what lets an invoice's own lines go on summing to exactly what it billed, however much is later paid against it.
 
 ### Migrations
 

@@ -305,7 +305,9 @@ vm.runInContext(files.map(function(f) {
 
 // Replace the stubs the modules need, AFTER loading (they declare `var`).
 const unknownCalls = [];
+const calls = [];
 cli.serverCall = function(name, args) {
+  calls.push({ name: name, args: args });
   if (!Object.prototype.hasOwnProperty.call(RESPONSES, name)) {
     unknownCalls.push(name);
     return Promise.resolve(null);
@@ -441,16 +443,59 @@ async function drive(label, fn) {
   await drive('undo a payment', function() { cli.undoPayment('BP-001'); });
   await drive('remove an allocation', function() { cli.removeAllocation('BC0526'); });
 
-  // Both must refuse before reaching the server, so the error is immediate.
+  // Zero is still refused before reaching the server, so the error is immediate.
   const beforeRefusals = toasts.length;
   cli.openPayPanel('pay-host-obligations', 'biz_tax', 'Tax to pay', 'pay', 1400);
   doc.getElementById('pay-amount').value = '0';
   cli.submitPayment();
-  doc.getElementById('pay-amount').value = '99999';
-  cli.submitPayment();
   const refusals = toasts.slice(beforeRefusals).filter(function(t) { return t.type === 'error'; });
-  check('a zero and an over-payment are both refused client-side',
-    refusals.length === 2, 'got ' + refusals.length + ' refusals');
+  check('a zero payment is refused client-side', refusals.length === 1,
+    'got ' + refusals.length + ' refusals');
+
+  // Paying more than is outstanding is no longer refused — it asks which it is.
+  console.log('\nOverpaying');
+  const surplusHost = function() { return doc.getElementById('pay-host-obligations').innerHTML; };
+  check('the question is hidden while the amount fits',
+    /id="pay-surplus" hidden/.test(surplusHost()));
+
+  doc.getElementById('pay-amount').value = '1600';
+  cli.onPayAmountChanged();
+  const lead = doc.getElementById('pay-surplus-lead');
+  check('typing more than the balance asks which it is',
+    doc.getElementById('pay-surplus').hidden === false &&
+    /\$200\.00/.test(lead.innerHTML) && /\$1,400\.00 outstanding/.test(lead.innerHTML),
+    lead.innerHTML);
+
+  function lastPayment() {
+    for (let i = calls.length - 1; i >= 0; i--) {
+      if (calls[i].name === 'payBudgetCategoriesFromClient') return String(calls[i].args).split('|');
+    }
+    return null;
+  }
+
+  await drive('record it as an overpayment', function() { cli.submitPayment(); });
+  check('overpayment is the default and is what gets sent',
+    lastPayment() && lastPayment()[5] === 'overpay', JSON.stringify(lastPayment()));
+
+  cli.openPayPanel('pay-host-obligations', 'biz_tax', 'Tax to pay', 'pay', 1400);
+  doc.getElementById('pay-amount').value = '1600';
+  doc.getElementById('pay-kind-correct').checked = true;
+  await drive('record it as a correction', function() { cli.submitPayment(); });
+  check('choosing correction sends that instead',
+    lastPayment() && lastPayment()[5] === 'correct', JSON.stringify(lastPayment()));
+
+  cli.openPayPanel('pay-host-obligations', 'biz_tax', 'Tax to pay', 'pay', 1400);
+  doc.getElementById('pay-amount').value = '400';
+  doc.getElementById('pay-note').value = 'ASB 4471 | prov tax';
+  await drive('an ordinary payment still asks nothing', function() { cli.submitPayment(); });
+  check('and keeps the server guard in place',
+    lastPayment() && lastPayment()[5] === 'refuse', JSON.stringify(lastPayment()));
+  // The mode went in before the note, so the note must still be everything
+  // after it — pipes and all.
+  check('the note still survives the delimiter, now that a field sits before it',
+    lastPayment() && lastPayment().slice(6).join('|') === 'ASB 4471 | prov tax',
+    JSON.stringify(lastPayment()));
+
   cli.closePayPanel();
 
   doc.getElementById('inv-business').value = 'BIZ-001';

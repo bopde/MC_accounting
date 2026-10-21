@@ -498,5 +498,72 @@ cli.renderInvoiceDetail({
 check('no PO line when there is no PO', printed.indexOf('PO #:') === -1);
 check('the invoice still renders without one', printed.indexOf('BC0626') !== -1);
 
+// --- Services and expenses are never conflated ---
+
+console.log('\nServices and expenses on the invoice');
+
+// $12,000 of time plus $240.50 of expenses recovered at cost. GST is on the
+// services only, so the two are different kinds of money and only one of them
+// is income — reading the combined subtotal for tax overstates earnings by
+// whatever was spent on the client's behalf.
+printed = '';
+cli.renderInvoiceDetail({
+  invoice: { invoice_id: 'AT0726', created_date: '2026-07-31', date_from: '2026-07-01',
+    date_to: '2026-07-31', po_number: '', status: 'sent', include_gst: true,
+    gst_rate: 0.15, time_subtotal: 12000, subtotal: 12240.5, gst_amount: 1800,
+    total: 14040.5, description: '', notes: '' },
+  business: { name: 'Auckland Transport', currency: 'NZD' },
+  myDetails: { business_name: 'Me Ltd', gst_number: '123-456-789' },
+  timeEntries: [], allocations: [],
+  expenses: [{ date: '2026-07-10', work_code: 'DEV', description: 'Flights', amount: 240.5 }],
+  codeGroups: [{ code: 'DEV', description: 'Development', totalHours: 80, totalAmount: 12000, rate: 150 }],
+  timeSubtotal: 12000, expenseSubtotal: 240.5, timeEntryCount: 1
+});
+
+check('services are shown on their own line', /Services<\/td><td class="number">\$12,000\.00/.test(printed));
+check('expenses are shown on their own line, and said to be at cost',
+  /Expenses \(recovered at cost\)<\/td><td class="number">\$240\.50/.test(printed));
+check('the combined figure is only ever a sum of the two above it',
+  /Subtotal<\/td><td class="number">\$12,240\.50/.test(printed));
+check('the three add up',
+  12000 + 240.5 === 12240.5 && /GST \(15% on services\)<\/td><td class="number">\$1,800\.00/.test(printed));
+check('and the total is the subtotal plus GST', /Total<\/td><td class="number">\$14,040\.50/.test(printed));
+check('services comes before the combined figure, so it is read first',
+  printed.indexOf('>Services<') < printed.indexOf('>Subtotal<'));
+
+// No expenses: no empty line, and services still named rather than implied.
+printed = '';
+cli.renderInvoiceDetail({
+  invoice: { invoice_id: 'AT0826', created_date: '2026-08-31', date_from: '2026-08-01',
+    date_to: '2026-08-31', po_number: '', status: 'sent', include_gst: false,
+    gst_rate: 0, time_subtotal: 900, subtotal: 900, gst_amount: 0, total: 900,
+    description: '', notes: '' },
+  business: { name: 'Auckland Transport', currency: 'NZD' },
+  myDetails: { business_name: 'Me Ltd' },
+  timeEntries: [], allocations: [], expenses: [],
+  codeGroups: [{ code: 'DEV', description: 'Development', totalHours: 6, totalAmount: 900, rate: 150 }],
+  timeSubtotal: 900, expenseSubtotal: 0, timeEntryCount: 1
+});
+check('no expenses line when there were none', printed.indexOf('recovered at cost') === -1);
+check('services is still named', /Services<\/td><td class="number">\$900\.00/.test(printed));
+
+// An invoice raised before time_subtotal existed: everything reads as services,
+// which is the closest honest answer, and the lines still add up.
+printed = '';
+cli.renderInvoiceDetail({
+  invoice: { invoice_id: '0325', created_date: '2026-03-31', date_from: '2026-03-01',
+    date_to: '2026-03-31', po_number: '', status: 'paid', include_gst: false,
+    gst_rate: 0, time_subtotal: '', subtotal: 1500, gst_amount: 0, total: 1500,
+    description: '', notes: '' },
+  business: { name: 'Auckland Transport', currency: 'NZD' },
+  myDetails: { business_name: 'Me Ltd' },
+  timeEntries: [], allocations: [], expenses: [],
+  codeGroups: [], timeSubtotal: 1500, expenseSubtotal: 0, timeEntryCount: 0
+});
+check('a pre-time_subtotal invoice still adds up',
+  /Services<\/td><td class="number">\$1,500\.00/.test(printed) &&
+  /Subtotal<\/td><td class="number">\$1,500\.00/.test(printed));
+check('no undefined or NaN on any printed invoice', !/undefined|NaN/.test(printed));
+
 console.log('\n' + passes + ' passed, ' + failures + ' failed');
 process.exit(failures > 0 ? 1 : 0);

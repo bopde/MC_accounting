@@ -216,6 +216,7 @@ function allocateBudget(invoiceId, ruleId) {
         amount: line.amount,
         status: autoPaid ? 'paid' : 'allocated',
         paid_amount: autoPaid ? line.amount : 0,
+        entry_type: ENTRY_ALLOCATION,
         transfer_date: autoPaid ? today : '',
         notes: autoPaid ? 'Auto-paid (withheld by payer)' : ''
       }));
@@ -270,6 +271,36 @@ function normaliseAllocationStatus(status) {
 }
 
 /**
+ * The three kinds of row BudgetAllocations holds.
+ *
+ * ENTRY_ALLOCATION is a line the cascade wrote from an invoice. The other two
+ * only ever come from a payment that exceeded what was outstanding, and the
+ * person recording it said which it was:
+ *
+ *   ENTRY_ADJUSTMENT — "I owed more than was allocated." Raises what is owed,
+ *                      and is settled by the same payment that revealed it.
+ *   ENTRY_CREDIT     — "I paid more than I owed." Owes nothing and is paid,
+ *                      so the bucket's outstanding goes negative and the next
+ *                      allocation to it is covered before any cash is needed.
+ *
+ * Keeping them out of ENTRY_ALLOCATION is what lets an invoice's own lines go
+ * on summing to exactly what it billed, however much is later paid against it.
+ */
+var ENTRY_ALLOCATION = '';
+var ENTRY_ADJUSTMENT = 'adjustment';
+var ENTRY_CREDIT = 'credit';
+
+function allocationEntryType(alloc) {
+  var raw = String((alloc && alloc.entry_type) || '').trim().toLowerCase();
+  return (raw === ENTRY_ADJUSTMENT || raw === ENTRY_CREDIT) ? raw : ENTRY_ALLOCATION;
+}
+
+/** A row the cascade wrote, as opposed to one a payment added afterwards. */
+function isCascadeLine(alloc) {
+  return allocationEntryType(alloc) === ENTRY_ALLOCATION;
+}
+
+/**
  * How much of an allocation has actually been paid.
  *
  * A blank `paid_amount` means the row predates partial payments, so `status`
@@ -287,6 +318,11 @@ function allocationPaidAmount(alloc) {
 
   var paid = Number(raw) || 0;
   if (paid < 0) return 0;
+
+  // A credit row owes nothing and is entirely paid, so the cap that stops a
+  // stray figure making a bucket look over-paid would erase it.
+  if (allocationEntryType(alloc) === ENTRY_CREDIT) return round2(paid);
+
   return paid > amount ? amount : round2(paid);
 }
 
@@ -362,7 +398,7 @@ function formatCoveredAllocations(applied) {
  * that range are eligible, so "pay the remaining" means exactly the figure on
  * screen and never reaches back into a period the user is not looking at.
  */
-function payBudgetCategories(categoryKeys, amount, paymentDate, notes, params) {
+function payBudgetCategories(categoryKeys, amount, paymentDate, notes, params, surplusMode) {
   var keys = (Array.isArray(categoryKeys) ? categoryKeys : String(categoryKeys || '').split(','))
     .map(function(k) { return String(k).trim(); })
     .filter(function(k) { return k.length > 0; });
@@ -377,6 +413,11 @@ function payBudgetCategories(categoryKeys, amount, paymentDate, notes, params) {
 
   var label = keys.map(function(k) { return getCategoryDef(k).label; }).join(' + ');
 
+  var mode = String(surplusMode || SURPLUS_REFUSE).trim().toLowerCase();
+  if ([SURPLUS_REFUSE, SURPLUS_OVERPAY, SURPLUS_CORRECT].indexOf(mode) === -1) {
+    throw new Error('Unknown way to handle a surplus: "' + surplusMode + '".');
+  }
+
   return withScriptLock(function() {
     assertPaymentsSheet();
 
@@ -386,14 +427,20 @@ function payBudgetCategories(categoryKeys, amount, paymentDate, notes, params) {
       return sum + allocationOutstanding(a);
     }, 0));
 
-    if (outstanding <= 0) {
+    if (outstanding <= 0 && mode === SURPLUS_REFUSE) {
       throw new Error('Nothing outstanding for ' + label + ' in this date range.');
     }
     // Half a cent of slack: the figure on screen is rounded, so "pay the
     // remaining" must not be rejected for matching it exactly.
-    if (payAmount - outstanding > 0.005) {
-      throw new Error('That is more than is outstanding for ' + label +
-        ' in this date range (' + outstanding.toFixed(2) + ').');
+    var surplus = round2(payAmount - outstanding);
+    if (surplus > 0.005) {
+      if (mode === SURPLUS_REFUSE) {
+        throw new Error('That is ' + formatMoneyPlain(surplus) + ' more than is outstanding for ' +
+          label + ' in this date range (' + outstanding.toFixed(2) + '). Say whether it is an ' +
+          'overpayment to hold as credit, or a correction to what was owed.');
+      }
+    } else {
+      surplus = 0;
     }
 
     var date = dateOnly(paymentDate) || todayLocal();
@@ -426,6 +473,29 @@ function payBudgetCategories(categoryKeys, amount, paymentDate, notes, params) {
       remaining = round2(remaining - take);
     });
 
+    // Whatever the allocations could not absorb becomes one extra row, of the
+    // kind the person chose. It is listed in `covered` like any other, so undo
+    // reverses it by the same path as the rest of the payment.
+    if (remaining > 0.004) {
+      var surplusRow = appendRow('BudgetAllocations', {
+        invoice_id: bucketAnchorInvoice(keys, params, eligible),
+        category: label,
+        category_key: keys[0],
+        scope: getCategoryDef(keys[0]).scope,
+        percentage: '',
+        amount: mode === SURPLUS_CORRECT ? remaining : 0,
+        status: 'paid',
+        paid_amount: remaining,
+        entry_type: mode === SURPLUS_CORRECT ? ENTRY_ADJUSTMENT : ENTRY_CREDIT,
+        transfer_date: date,
+        notes: mode === SURPLUS_CORRECT
+          ? 'Correction: owed more than was allocated'
+          : 'Overpayment held as credit'
+      });
+      applied.push({ allocation_id: surplusRow.allocation_id, amount: remaining });
+      remaining = 0;
+    }
+
     var payment = appendRow('BudgetPayments', {
       payment_date: date,
       category_key: keys.join(','),
@@ -441,9 +511,62 @@ function payBudgetCategories(categoryKeys, amount, paymentDate, notes, params) {
       payment_id: payment.payment_id,
       amount: payment.amount,
       category: label,
-      allocations: applied.length
+      allocations: applied.length,
+      surplus: surplus,
+      surplusMode: surplus > 0 ? mode : null
     };
   });
+}
+
+/**
+ * What to do when a payment comes to more than was outstanding.
+ *
+ *   refuse  — the default, and what every caller got before this existed
+ *   overpay — you paid more than you owed; hold the extra as credit
+ *   correct — you owed more than was allocated; raise what is owed to match
+ */
+var SURPLUS_REFUSE = 'refuse';
+var SURPLUS_OVERPAY = 'overpay';
+var SURPLUS_CORRECT = 'correct';
+
+/**
+ * Which invoice a surplus row belongs to.
+ *
+ * It belongs to no invoice really — it is a fact about the bucket. But every
+ * figure on the page is filtered by its invoice's date, so a row with no
+ * invoice would vanish the moment a date filter was applied, taking the credit
+ * with it. The most recent invoice the bucket touched inside the range is the
+ * period the payment was for, so the surplus is filed there.
+ */
+function bucketAnchorInvoice(keys, params, eligible) {
+  var wanted = {};
+  keys.forEach(function(k) { wanted[k] = true; });
+
+  var invoices = getByDateParams('Invoices', 'created_date', params);
+  var isFiltered = isFilteringParams(params);
+  var invDate = {};
+  invoices.forEach(function(inv) {
+    invDate[normalizeId(inv.invoice_id)] = dateOnly(inv.created_date) || '';
+  });
+
+  var candidates = (eligible && eligible.length ? eligible : getAll('BudgetAllocations'))
+    .filter(function(a) {
+      if (!wanted[resolveCategoryKey(a)]) return false;
+      return !isFiltered || invDate[normalizeId(a.invoice_id)] !== undefined;
+    });
+
+  if (candidates.length === 0) {
+    throw new Error('Nothing has been allocated to this bucket in this date range, ' +
+      'so there is nothing to hold a payment against. Allocate an invoice first.');
+  }
+
+  candidates.sort(function(a, b) {
+    var da = invDate[normalizeId(a.invoice_id)] || '';
+    var db = invDate[normalizeId(b.invoice_id)] || '';
+    if (da !== db) return da < db ? 1 : -1;
+    return String(a.allocation_id) < String(b.allocation_id) ? 1 : -1;
+  });
+  return candidates[0].invoice_id;
 }
 
 /**
@@ -493,10 +616,19 @@ function undoBudgetPayment(paymentId) {
 
     var covered = parseCoveredAllocations(payment.covered);
     var allocs = getAll('BudgetAllocations');
+    var surplusRows = [];
 
     covered.forEach(function(entry) {
       var alloc = allocs.find(function(a) { return idsMatch(a.allocation_id, entry.allocation_id); });
       if (!alloc) return;
+
+      // A correction or a credit exists only because of this payment, so
+      // undoing the payment removes it rather than leaving a row that owes
+      // nothing and has been paid nothing.
+      if (!isCascadeLine(alloc)) {
+        surplusRows.push(alloc);
+        return;
+      }
 
       var paid = round2(allocationPaidAmount(alloc) - entry.amount);
       alloc.paid_amount = paid > 0 ? paid : 0;
@@ -509,6 +641,10 @@ function undoBudgetPayment(paymentId) {
       }
       updateRow('BudgetAllocations', alloc._rowIndex, alloc);
     });
+
+    // Descending, so deleting one never shifts another still to be deleted.
+    surplusRows.sort(function(a, b) { return b._rowIndex - a._rowIndex; })
+      .forEach(function(a) { deleteRow('BudgetAllocations', a._rowIndex); });
 
     deleteRow('BudgetPayments', payment._rowIndex);
 
@@ -643,6 +779,7 @@ function getBudgetSummary(params) {
     cat.paid += paid;
     cat.outstanding += outstanding;
 
+    var entryType = allocationEntryType(a);
     cat.items.push({
       allocation_id: a.allocation_id,
       invoice_id: a.invoice_id,
@@ -650,8 +787,11 @@ function getBudgetSummary(params) {
       amount: amount,
       paid: paid,
       outstanding: outstanding,
+      entry_type: entryType,
       // 'part-paid' is display only: the stored status stays allocated/paid.
-      status: outstanding <= 0.004 ? 'paid' : (paid > 0 ? 'part-paid' : 'allocated'),
+      status: entryType === ENTRY_CREDIT ? 'credit'
+        : entryType === ENTRY_ADJUSTMENT ? 'correction'
+        : outstanding <= 0.004 ? 'paid' : (paid > 0 ? 'part-paid' : 'allocated'),
       transfer_date: a.transfer_date || '',
       notes: a.notes || ''
     });

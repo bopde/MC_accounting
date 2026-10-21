@@ -190,6 +190,8 @@ srv.payBudgetCategories('per_tax,legacy_tax', 2500, '2026-07-02', '', RANGE);
 srv.payBudgetCategories('owner_pay', 9000, '2026-07-03', 'Drawn to personal', RANGE);
 srv.payBudgetCategories('per_save,legacy_save', 800, '2026-07-04', 'Emergency fund', RANGE);
 srv.payBudgetCategories('biz_reserve', 1500, '2026-07-05', '', RANGE);
+// Paid more ACC than was owed, kept as credit — so a credit tile is in shot.
+srv.payBudgetCategories('biz_acc', 420, '2026-07-05', 'Rounded up the ACC invoice', RANGE, 'overpay');
 
 const summary = srv.getBudgetSummary(RANGE);
 
@@ -206,7 +208,14 @@ const cli = {
   console: console,
   document: {
     getElementById: function(id) {
-      if (!hosts[id]) hosts[id] = { id: id, innerHTML: '', focus: function() {} };
+      if (!hosts[id]) {
+        hosts[id] = {
+          id: id, innerHTML: '', value: '', hidden: false, checked: false,
+          focus: function() {},
+          setAttribute: function(k, v) { if (k === 'hidden') this.hidden = true; else this[k] = v; },
+          removeAttribute: function(k) { if (k === 'hidden') this.hidden = false; }
+        };
+      }
       return hosts[id];
     }
   },
@@ -240,12 +249,28 @@ const history = cli.renderHistorySection(summary, cats);
 
 // The payment panel, produced by the real openPayPanel and spliced into the
 // host it targets — there is no server here to click a button against.
-const gst = cli.sumCats(cats, ['biz_tax']);
-cli.openPayPanel('pay-host-obligations', 'biz_tax', 'Tax to pay', 'pay', gst.outstanding);
+const tax = cli.sumCats(cats, ['biz_tax']);
+cli.openPayPanel('pay-host-obligations', 'biz_tax', 'Tax to pay', 'pay', tax.outstanding);
 const panel = hosts['pay-host-obligations'].innerHTML;
 const withPanel = overview.replace(
   '<div class="pay-host" id="pay-host-obligations"></div>',
   '<div class="pay-host" id="pay-host-obligations">' + panel + '</div>');
+
+// And the same panel with more typed in than is outstanding, which is what
+// raises the overpay-or-correct question. The question's wording comes from
+// the real onPayAmountChanged; it is spliced in because innerHTML in this stub
+// is a plain string, so mutating a child element does not reach its parent.
+hosts['pay-amount'].value = String(Math.round((tax.outstanding + 250) * 100) / 100);
+cli.onPayAmountChanged();
+const surplusPanel = panel
+  .replace('id="pay-surplus" hidden', 'id="pay-surplus"')
+  .replace('id="pay-surplus-lead"></p>',
+    'id="pay-surplus-lead">' + hosts['pay-surplus-lead'].innerHTML + '</p>')
+  .replace('id="pay-amount" step="0.01" min="0.01" value="' + tax.outstanding.toFixed(2) + '"',
+    'id="pay-amount" step="0.01" min="0.01" value="' + hosts['pay-amount'].value + '"');
+const withSurplus = overview.replace(
+  '<div class="pay-host" id="pay-host-obligations"></div>',
+  '<div class="pay-host" id="pay-host-obligations">' + surplusPanel + '</div>');
 
 // --- Page shell, mirroring index.html ---
 
@@ -317,6 +342,9 @@ const SHOTS = [
   { file: 'money-flow-payment-panel.png', width: 1280,
     html: page(withPanel + history),
     caption: 'Recording a payment: full remaining or any part of it.' },
+  { file: 'money-flow-overpayment.png', width: 1280,
+    html: page(withSurplus + history),
+    caption: 'Paying more than is owed: overpayment, or a correction?' },
   // The history alone, at 1x: expanded it runs to several thousand pixels, and
   // at 2x over the whole page the file is too large to be worth reviewing.
   { file: 'money-flow-history.png', width: 1280, scale: 1,
