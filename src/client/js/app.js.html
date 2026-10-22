@@ -48,9 +48,12 @@ var App = {
   },
 
   route: function() {
-    var hash = window.location.hash.replace('#', '') || 'hours';
+    // Dashboard, matching where the nav starts. Landing on Hours made the
+    // first screen the data-entry one rather than the one that says how
+    // things stand.
+    var hash = window.location.hash.replace('#', '') || 'dashboard';
     var page = App.pages[hash];
-    if (!page) { window.location.hash = '#hours'; return; }
+    if (!page) { window.location.hash = '#dashboard'; return; }
 
     App.currentPage = hash;
 

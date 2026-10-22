@@ -52,7 +52,13 @@ const db = {
       include_gst: true, gst_rate: 0.15, time_subtotal: 158.73, subtotal: 158.73,
       gst_amount: 23.81, total: 182.54, status: 'paid', budget_rule_id: 'BR-000', _rowIndex: 3 }
   ],
-  BudgetRules: [Object.assign({}, COMPANY_RULE, { _rowIndex: 2 })],
+  // A pre-company rule too, so the frozen cascade can be tried and refused.
+  BudgetRules: [
+    Object.assign({}, COMPANY_RULE, { _rowIndex: 2 }),
+    { rule_id: 'BR-000', name: 'Old Split', model: 'sole_trader', is_default: false, active: true,
+      tax_withheld_pct: 0.10, tax_to_pay_pct: 0.28, acc_withheld_pct: 0, acc_to_pay_pct: 0.02,
+      donate_pct: 0.05, save_pct: 0.10, invest_pct: 0.15, spend_pct: 0.70, _rowIndex: 3 }
+  ],
   // Pre-company allocations: free-text labels, no category_key or scope.
   // The withheld row is what the payer deducted and paid to the IRD — already
   // settled, and the case that proves withholding is counted inside its
@@ -196,6 +202,30 @@ try {
   blocked = /already allocated/.test(e.message);
 }
 assert(blocked, 'a second allocation of the same invoice is refused');
+
+// --- The sole-trader cascade is frozen ---
+
+console.log('\nThe pre-company cascade reads but no longer writes');
+
+assert((function() {
+  let refused = '';
+  try { app.allocateBudget('0425', 'BR-000'); } catch (e) { refused = e.message; }
+  return /pre-company \(sole trader\) rule/.test(refused);
+})(), 'a new allocation on an old rule is refused, and says why');
+
+assert((function() {
+  let refused = '';
+  try { app.previewAllocation('0425', 'BR-000'); } catch (e) { refused = e.message; }
+  return /pre-company \(sole trader\) rule/.test(refused);
+})(), 'and refused at the preview, before anything has been read');
+
+assert((function() {
+  const legacyRule = { rule_id: 'BR-000', name: 'Old Split', model: '',
+    tax_withheld_pct: 0.1, tax_to_pay_pct: 0.28, acc_withheld_pct: 0, acc_to_pay_pct: 0.02,
+    donate_pct: 0.05, save_pct: 0.10, invest_pct: 0.15, spend_pct: 0.70 };
+  const plan = app.computeLegacyAllocation(legacyRule, 1000, 0);
+  return r2(plan.lines.reduce(function(s, l) { return s + l.amount; }, 0)) === 1000;
+})(), 'the maths itself still works — it is the write path that closed, not the cascade');
 
 // --- Summary ---
 

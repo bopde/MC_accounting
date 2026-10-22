@@ -13,7 +13,7 @@ function renderHoursPage(container) {
   container.innerHTML =
     '<div class="tab-bar" id="hours-tabs">' +
       '<button type="button" class="active" onclick="showHoursTab(\'time\')">Time</button>' +
-      '<button type="button" onclick="showHoursTab(\'expenses\')">Expenses</button>' +
+      '<button type="button" onclick="showHoursTab(\'expenses\')">Client expenses</button>' +
     '</div>' +
     '<div id="hours-tab-content"></div>';
 
@@ -365,6 +365,11 @@ function renderExpenseTab() {
   var bizSelected = businesses.length === 1 ? businesses[0].business_id : '';
 
   content.innerHTML =
+    '<p class="muted small" style="margin:0 0 0.75rem;">' +
+      'Costs you paid on a client&rsquo;s behalf and will bill back on their invoice, ' +
+      'recovered at cost. What the company spends on <em>itself</em> goes under ' +
+      '<strong>Budget &rarr; Business Expenses</strong> instead.' +
+    '</p>' +
     '<form id="expense-form" onsubmit="submitExpense(event)">' +
       '<div class="form-row">' +
         '<label>Business ' + buildSelect('exp-business', businesses, 'business_id', 'name', { required: true, selected: bizSelected, placeholder: businesses.length === 1 ? false : 'Select...' }) + '</label>' +
@@ -376,7 +381,7 @@ function renderExpenseTab() {
       '</div>' +
       '<label>What for <input type="text" id="exp-desc" placeholder="Description" required></label>' +
       '<div class="form-actions">' +
-        '<button type="submit" class="btn-primary" id="exp-submit-btn">Add expense</button>' +
+        '<button type="submit" class="btn-primary" id="exp-submit-btn">Add client expense</button>' +
         '<button type="button" class="btn-subtle" id="exp-cancel-edit" style="display:none" onclick="cancelExpenseEdit()">Cancel</button>' +
       '</div>' +
     '</form>' +
@@ -417,7 +422,7 @@ function renderExpensesTable(expenses) {
   var el = document.getElementById('expenses-list');
   el.removeAttribute('aria-busy');
   if (!expenses || expenses.length === 0) {
-    el.innerHTML = '<p class="muted">No expenses found.</p>';
+    el.innerHTML = '<p class="muted">No client expenses found.</p>';
     return;
   }
 

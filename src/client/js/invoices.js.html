@@ -35,12 +35,9 @@ function renderInvoiceList() {
   var existingFrom = document.getElementById('inv-filter-from');
   var existingTo = document.getElementById('inv-filter-to');
   if (existingFrom && existingTo) {
-    AppState.dateFrom = existingFrom.value;
-    AppState.dateTo = existingTo.value;
+    setReportRange(existingFrom.value, existingTo.value);
   } else {
-    var range = datePreset('3months');
-    AppState.dateFrom = range.from;
-    AppState.dateTo = range.to;
+    reportRange();
   }
 
   content.innerHTML =
@@ -48,7 +45,7 @@ function renderInvoiceList() {
       buildDateFilters('inv-filter-from', 'inv-filter-to', AppState.dateFrom, AppState.dateTo) +
       '<button type="button" class="btn-subtle" onclick="renderInvoiceList()">Apply</button>' +
     '</div>' +
-    '<p class="muted small" style="margin:-0.5rem 0 0.5rem;">Default: last 3 months</p>' +
+    '<p class="muted small" style="margin:-0.5rem 0 0.5rem;">Shared with the Dashboard and Budget</p>' +
     '<div id="invoice-list-body" aria-busy="true">Loading invoices...</div>';
 
   serverCall('getInvoicesWithDetails', { dateFrom: AppState.dateFrom, dateTo: AppState.dateTo }).then(function(invoices) {

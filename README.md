@@ -210,9 +210,26 @@ Schema changes only take effect when `setupSheets()` runs. Until then, any write
 1. **Load-time banner**: `bootstrap()` returns `schemaWarnings` from `checkSchema()`, and the app shows a banner naming the sheets and columns that are missing.
 1. **Loud writes**: `assertKnownColumns` throws rather than dropping a field with no column.
 
+#### One shared date range
+
+Dashboard, Invoices, Money Flow and Business Expenses share a single range, set once per session. Each page used to reset it to its own preset on render, so a range chosen on the Dashboard silently became three months on Invoices and six on Budget.
+
+Two deliberate exceptions:
+
+1. a. **Hours** keeps its own short default (today and yesterday). It is the data-entry screen, not a reporting one, and a six-month list is the wrong thing to type into.
+1. b. **Allocate Invoice** has no date window at all. A paid invoice with no budget behind it is a to-do, not a period figure — the same reason the Dashboard's waiting count ignores the filter. A window here could hide an invoice from this tab while the Dashboard went on saying it was waiting.
+
+A screen that needs the exact range it was *rendered* with still snapshots it: Money Flow bounds a payment by `BudgetRange`, which is a render-time copy, not a live reading of the preference.
+
 `setupSheets()` is idempotent: create missing sheets, append missing columns (`migrateColumns`), repair allocation identity columns (`migrateBudgetAllocations`), backfill `paid_amount` (`migrateAllocationPaidAmounts`), and seed a company rule if none exists.
 
 `migrateAllocationPaidAmounts` fills only blank cells, from the status that was already there — a `paid` row was paid in full, an `allocated` row was not paid at all. A partial payment recorded since is never overwritten.
+
+#### The sole-trader cascade is frozen
+
+It reads, it no longer writes. Historical allocations render exactly as they did, but a **new** allocation cannot use a pre-company rule: those rules are not offered on the Allocate tab, and both `previewAllocation` and `allocateBudget` refuse them.
+
+The set of pre-company invoices can never grow by one row, and keeping the write path open kept a second cascade alive in every grouping — a `legacy_` twin for each bucket — to serve data that is finished. The maths itself is untouched and still tested, so the rows it produced go on reconciling.
 
 `migrateBudgetAllocations` classifies **per invoice**, not per row. Six category labels — `Donate`, `Save`, `Invest`, `Spend`, `Tax Withheld`, `ACC Withheld` — are identical in both models, so a single row is ambiguous. A whole invoice is not: only a company allocation can contain `GST`, `Business Tax`, `Business ACC`, `Reserve`, `Owner Pay`, `Personal Tax` or `Personal ACC`. If any row in an invoice's set carries one of those, every row in that set is company. Amounts, labels and statuses are never rewritten — only the two identity columns are filled.
 
@@ -456,9 +473,9 @@ The rule lives in one place (`attributeTimeToContracts` in `ContractService.gs`)
 
 **Budget → Business Expenses** records what the company spends on itself — software, hardware, accounting fees — and draws it out of the pot that paid for it.
 
-This is a different thing from **Hours → Expenses**, and the two never meet:
+This is a different thing from **Hours → Client expenses**, and the two never meet. Each screen says so and points at the other, because the word "expenses" on its own does not distinguish them:
 
-| | Hours → Expenses | Budget → Business Expenses |
+| | Hours → Client expenses | Budget → Business Expenses |
 |---|---|---|
 | Billed to | a client, on an invoice | nobody |
 | In the cascade | excluded — a pass-through | excluded — spent after allocation |

@@ -345,7 +345,35 @@ function buildBook() {
       };
     })
   });
-  BOOK.forEach(function(b) { app.allocateBudget(b.id, b.rule); });
+  BOOK.forEach(function(b) {
+    if (b.rule === 'BR-001') { app.allocateBudget(b.id, b.rule); return; }
+
+    allocateHistorically(b.id, b.time, b.gst ? r2(b.time * 0.15) : 0, b.date);
+  });
+}
+
+/**
+ * Write a pre-company allocation as the stored rows it actually is.
+ *
+ * The sole-trader cascade is frozen — it reads, it does not write — so these
+ * go in through the same maths the old version used rather than through
+ * allocateBudget. Asking today's app to create data it can no longer create
+ * would not be testing a historical invoice; it would be testing a path that
+ * is deliberately closed.
+ */
+function allocateHistorically(invoiceId, time, gst, date) {
+  app.computeLegacyAllocation(LEGACY_RULE, time, gst).lines.forEach(function(line) {
+    if (line.amount === 0) return;
+    const autoPaid = line.settle === 'auto_paid';
+    app.appendRow('BudgetAllocations', {
+      invoice_id: invoiceId, category: line.label, category_key: line.key, scope: line.scope,
+      percentage: line.pct == null ? '' : line.pct, amount: line.amount,
+      status: autoPaid ? 'paid' : 'allocated',
+      paid_amount: autoPaid ? line.amount : 0,
+      entry_type: '', transfer_date: autoPaid ? date : '',
+      notes: autoPaid ? 'Auto-paid (withheld by payer)' : ''
+    });
+  });
 }
 
 /** What the invoices themselves say was billed for time, plus GST. */
@@ -894,7 +922,7 @@ check('even when the sole-trader share is bigger than the balance owed', functio
         subtotal: 1000, gst_amount: 0, total: 1000, status: 'paid', budget_rule_id: '' }
     ]
   });
-  app.allocateBudget('AT0126', 'BR-000');
+  allocateHistorically('AT0126', 15000, 0, '2026-01-31');
   app.allocateBudget('AT0226', 'BR-001');
 
   const cats = cli.catByKey(app.getBudgetSummary(RANGE));

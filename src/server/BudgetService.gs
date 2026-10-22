@@ -154,6 +154,22 @@ function buildAllocationPlan(invoice, rule) {
 }
 
 /**
+ * The sole-trader cascade is FROZEN: it still reads, it no longer writes.
+ *
+ * It exists for invoices raised before the company did, and that set can never
+ * grow by one row. Letting new allocations use it kept a second cascade alive
+ * in every grouping and every change — a `legacy_` twin for each bucket — to
+ * serve data that is finished. Historical allocations go on rendering exactly
+ * as they did; only starting a NEW one on an old rule is refused.
+ */
+function assertRuleUsableForNewAllocation(rule) {
+  if (ruleModel(rule) !== MODEL_SOLE_TRADER) return;
+  throw new Error('"' + (rule.name || rule.rule_id) + '" is a pre-company (sole trader) rule. ' +
+    'Those are kept so historical allocations still read, but new ones cannot use them — ' +
+    'allocate against a company rule instead.');
+}
+
+/**
  * Preview an allocation. Returns exactly what allocateBudget would write.
  */
 function previewAllocation(invoiceId, ruleId) {
@@ -162,6 +178,9 @@ function previewAllocation(invoiceId, ruleId) {
 
   var rule = findById('BudgetRules', ruleId);
   if (!rule) throw new Error('Budget rule not found: ' + ruleId);
+  // Refused here as well as on the write, so the message arrives before the
+  // user has read a preview of something that cannot be confirmed.
+  assertRuleUsableForNewAllocation(rule);
 
   var business = invoice.business_id ? findById('Businesses', invoice.business_id) : null;
   var plan = buildAllocationPlan(invoice, rule);
@@ -189,15 +208,19 @@ function allocateBudget(invoiceId, ruleId) {
     var invoice = findById('Invoices', invoiceId);
     if (!invoice) throw new Error('Invoice not found: ' + invoiceId);
 
+    // The rule is checked before the state is: being handed a rule that cannot
+    // be used is a fact about the request, and saying so beats reporting
+    // whatever the invoice happens to be in the middle of.
+    var rule = findById('BudgetRules', ruleId);
+    if (!rule) throw new Error('Budget rule not found: ' + ruleId);
+    assertRuleUsableForNewAllocation(rule);
+
     var existing = getAll('BudgetAllocations').filter(function(a) {
       return idsMatch(a.invoice_id, invoiceId);
     });
     if (existing.length > 0) {
       throw new Error('Budget already allocated for this invoice.');
     }
-
-    var rule = findById('BudgetRules', ruleId);
-    if (!rule) throw new Error('Budget rule not found: ' + ruleId);
 
     var plan = buildAllocationPlan(invoice, rule);
     var today = todayLocal();

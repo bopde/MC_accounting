@@ -758,5 +758,68 @@ check('an un-migrated spreadsheet is told so rather than failing obscurely', fun
   app.getAll = realGetAll;
 });
 
+// --- 9. The allocation nudge ---
+
+section('Paid invoices with no budget behind them are counted, whatever the filter');
+
+check('counted across all time, not just the range on screen', function() {
+  build({
+    Businesses: [BUSINESS],
+    WorkCodes: [{ code_id: 'DEV', description: 'Development', category: 'billable', active: true }],
+    BudgetRules: [RULE],
+    TimeEntries: [entry('TE-001', '2026-02-04', 'DEV', 150, 10)]
+  });
+  app.generateInvoice({ businessId: 'BIZ-001', dateFrom: '2026-02-01', dateTo: '2026-02-28',
+    includeGst: true, gstRate: 0.15 });
+  app.updateInvoiceStatus('AT0226', 'sent');
+  app.updateInvoiceStatus('AT0226', 'paid');
+
+  // A range that excludes February entirely.
+  const dash = app.getDashboardData({ dateFrom: '2026-06-01', dateTo: '2026-06-30' });
+  eq(dash.invoices.length, 0, 'the invoice is outside the range, as set up');
+  eq(dash.pendingAllocation.count, 1, 'but it is still counted as waiting');
+  near(dash.pendingAllocation.value, 1725, 'at its billed value plus GST');
+  eq(dash.pendingAllocation.oldest, '2026-02-28', 'and dated');
+});
+
+check('allocating it clears the count', function() {
+  build({
+    Businesses: [BUSINESS],
+    WorkCodes: [{ code_id: 'DEV', description: 'Development', category: 'billable', active: true }],
+    BudgetRules: [RULE],
+    TimeEntries: [entry('TE-001', '2026-02-04', 'DEV', 150, 10)]
+  });
+  app.generateInvoice({ businessId: 'BIZ-001', dateFrom: '2026-02-01', dateTo: '2026-02-28',
+    includeGst: true, gstRate: 0.15 });
+  app.updateInvoiceStatus('AT0226', 'sent');
+  app.updateInvoiceStatus('AT0226', 'paid');
+  eq(app.getDashboardData({}).pendingAllocation.count, 1, 'waiting to begin with');
+
+  app.allocateBudget('AT0226', 'BR-001');
+  eq(app.getDashboardData({}).pendingAllocation.count, 0, 'cleared once allocated');
+
+  // And comes back if the allocation is removed, which is the honest answer.
+  app.deallocateInvoice('AT0226');
+  eq(app.getDashboardData({}).pendingAllocation.count, 1, 'back after removing it');
+});
+
+check('an unpaid or voided invoice is not waiting for anything', function() {
+  build({
+    Businesses: [BUSINESS],
+    WorkCodes: [{ code_id: 'DEV', description: 'Development', category: 'billable', active: true }],
+    BudgetRules: [RULE],
+    TimeEntries: [entry('TE-001', '2026-02-04', 'DEV', 150, 10)]
+  });
+  app.generateInvoice({ businessId: 'BIZ-001', dateFrom: '2026-02-01', dateTo: '2026-02-28',
+    includeGst: false });
+  eq(app.getDashboardData({}).pendingAllocation.count, 0, 'a draft is not waiting');
+
+  app.updateInvoiceStatus('AT0226', 'sent');
+  eq(app.getDashboardData({}).pendingAllocation.count, 0, 'nor is a sent one');
+
+  app.updateInvoiceStatus('AT0226', 'void');
+  eq(app.getDashboardData({}).pendingAllocation.count, 0, 'nor a voided one');
+});
+
 console.log('\n' + passes + ' passed, ' + failures + ' failed');
 process.exit(failures > 0 ? 1 : 0);

@@ -139,6 +139,13 @@ const INVOICE = { invoice_id: 'BC0526', business_id: 'BIZ-001', business_name: "
   total: 5750, status: 'paid', budget_rule_id: '', contract_id: '', po_number: '',
   description: '', notes: '', line_descriptions: '', _rowIndex: 2 };
 
+// Paid and NOT in the allocation fixture, so the Allocate tab has something to
+// offer and its rule picker renders.
+const UNALLOCATED_INVOICE = Object.assign({}, INVOICE, {
+  invoice_id: 'BC0626', date_from: '2026-06-01', date_to: '2026-06-30',
+  created_date: '2026-06-30', _rowIndex: 3
+});
+
 const TIME_ENTRY = { entry_id: 'TE-001', business_id: 'BIZ-001', date: '2026-05-15',
   time_start: '09:00', time_end: '17:00', hours: 8, description: 'Work',
   work_code: 'DEV', rate: 150, line_total: 1200, invoice_id: '', contract_id: '', _rowIndex: 2 };
@@ -220,7 +227,7 @@ const RESPONSES = {
   },
   getTimeEntries: [TIME_ENTRY],
   getExpenses: [EXPENSE],
-  getInvoicesWithDetails: [INVOICE],
+getInvoicesWithDetails: [INVOICE, UNALLOCATED_INVOICE],
   getInvoiceDetails: {
     invoice: INVOICE, business: BUSINESS, myDetails: RESPONSES_MY_DETAILS(),
     timeEntries: [TIME_ENTRY], expenses: [EXPENSE], allocations: [ALLOCATION],
@@ -392,6 +399,11 @@ async function drive(label, fn) {
   await drive('invoices > create', function() { cli.showInvoiceTab('create'); });
   await drive('invoices > list', function() { cli.showInvoiceTab('list'); });
   await drive('budget > allocate', function() { cli.showBudgetTab('allocate'); });
+  check('the allocate picker offers only company rules',
+    (function() {
+      const html = doc.getElementById('budget-tab-content').innerHTML;
+      return html.indexOf('Company Default') !== -1 && html.indexOf('Old Split') === -1;
+    })(), doc.getElementById('budget-tab-content').innerHTML.slice(0, 300));
   await drive('budget > money flow', function() { cli.showBudgetTab('summary'); });
   await drive('budget > business expenses', function() { cli.showBudgetTab('expenses'); });
   for (const tab of ['mydetails', 'businesses', 'contracts', 'codes', 'accounts', 'rules']) {
@@ -509,6 +521,51 @@ async function drive(label, fn) {
     JSON.stringify(lastPayment()));
 
   cli.closePayPanel();
+
+  console.log('\nOne range, shared across the reporting screens');
+  cli.setReportRange('2026-02-01', '2026-02-28');
+  await drive('dashboard keeps it', function() { cli.renderDashboardPage(container); });
+  check('the dashboard did not reset it to its own preset',
+    cli.AppState.dateFrom === '2026-02-01' && cli.AppState.dateTo === '2026-02-28',
+    cli.AppState.dateFrom + ' .. ' + cli.AppState.dateTo);
+
+  await drive('invoices keep it', function() { cli.showInvoiceTab('list'); });
+  check('invoices did not reset it either',
+    cli.AppState.dateFrom === '2026-02-01' && cli.AppState.dateTo === '2026-02-28',
+    cli.AppState.dateFrom + ' .. ' + cli.AppState.dateTo);
+
+  await drive('money flow keeps it', function() { cli.showBudgetTab('summary'); });
+  check('and money flow uses it to bound a payment',
+    cli.BudgetRange.from === '2026-02-01' && cli.BudgetRange.to === '2026-02-28',
+    JSON.stringify(cli.BudgetRange));
+
+  await drive('business expenses keep it', function() { cli.showBudgetTab('expenses'); });
+  check('the expenses tab shares it too',
+    cli.ExpenseRange.from === '2026-02-01' && cli.ExpenseRange.to === '2026-02-28',
+    JSON.stringify(cli.ExpenseRange));
+
+  const beforeAllocate = calls.length;
+  await drive('allocate tab', function() { cli.showBudgetTab('allocate'); });
+  check('the allocate tab asks for every invoice, with no window at all', (function() {
+    const call = calls.slice(beforeAllocate)
+      .find(function(c) { return c.name === 'getInvoicesWithDetails'; });
+    if (!call) return false;
+    const a = call.args || {};
+    return !a.dateFrom && !a.dateTo;
+  })());
+
+  console.log('\nThe allocation nudge');
+  check('it says how many are waiting, and what they are worth',
+    (function() {
+      const html = cli.dashPendingAllocation({ count: 3, value: 12450.5, oldest: '2026-02-28' });
+      return html.indexOf('3 paid invoices waiting') !== -1 &&
+        html.indexOf('$12,450.50') !== -1 && html.indexOf('href="#budget"') !== -1;
+    })());
+  check('one invoice reads as one, not "1 invoices"',
+    cli.dashPendingAllocation({ count: 1, value: 100, oldest: '' }).indexOf('1 paid invoice waiting') !== -1);
+  check('nothing waiting renders nothing at all',
+    cli.dashPendingAllocation({ count: 0, value: 0, oldest: '' }) === '' &&
+    cli.dashPendingAllocation(null) === '');
 
   console.log('\nBusiness expenses');
   await drive('record one', function() {

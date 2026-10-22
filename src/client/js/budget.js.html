@@ -89,23 +89,22 @@ function renderBudgetSummary() {
   var existingFrom = document.getElementById('budget-filter-from');
   var existingTo = document.getElementById('budget-filter-to');
   if (existingFrom && existingTo) {
-    AppState.dateFrom = existingFrom.value;
-    AppState.dateTo = existingTo.value;
+    setReportRange(existingFrom.value, existingTo.value);
   } else {
-    var range = datePreset('6months');
-    AppState.dateFrom = range.from;
-    AppState.dateTo = range.to;
+    reportRange();
   }
 
-  BudgetRange = { from: AppState.dateFrom, to: AppState.dateTo };
+  // A snapshot of the range this render used, not a live reading: a payment is
+  // applied to exactly the figures that were on screen when it was recorded.
+  BudgetRange = reportRange();
   BudgetPay = { keys: '', label: '', settle: '', outstanding: 0 };
 
   content.innerHTML =
     '<div class="filters">' +
-      buildDateFilters('budget-filter-from', 'budget-filter-to', AppState.dateFrom, AppState.dateTo) +
+      buildDateFilters('budget-filter-from', 'budget-filter-to', BudgetRange.from, BudgetRange.to) +
       '<button type="button" class="btn-subtle" onclick="renderBudgetSummary()">Apply</button>' +
     '</div>' +
-    '<p class="muted small" style="margin:-0.5rem 0 0.5rem;">Default: last 6 months</p>' +
+    '<p class="muted small" style="margin:-0.5rem 0 0.5rem;">Shared with the Dashboard and Invoices</p>' +
     '<div id="budget-summary-body" aria-busy="true">Loading...</div>';
 
   serverCall('getBudgetSummary', { dateFrom: AppState.dateFrom, dateTo: AppState.dateTo }).then(function(summary) {
@@ -1007,18 +1006,18 @@ function renderBusinessExpenses() {
   var existingFrom = document.getElementById('be-filter-from');
   var existingTo = document.getElementById('be-filter-to');
   if (existingFrom && existingTo) {
-    ExpenseRange = { from: existingFrom.value, to: existingTo.value };
+    setReportRange(existingFrom.value, existingTo.value);
   } else {
-    var range = datePreset('ytd');
-    ExpenseRange = { from: range.from, to: range.to };
+    reportRange();
   }
+  ExpenseRange = reportRange();
 
   content.innerHTML =
     '<div class="filters">' +
       buildDateFilters('be-filter-from', 'be-filter-to', ExpenseRange.from, ExpenseRange.to) +
       '<button type="button" class="btn-subtle" onclick="renderBusinessExpenses()">Apply</button>' +
     '</div>' +
-    '<p class="muted small" style="margin:-0.5rem 0 0.5rem;">Default: this year</p>' +
+    '<p class="muted small" style="margin:-0.5rem 0 0.5rem;">Shared with the Dashboard and Invoices</p>' +
     '<div id="be-body" aria-busy="true">Loading...</div>';
 
   serverCall('getBusinessExpenseView', { dateFrom: ExpenseRange.from, dateTo: ExpenseRange.to })
@@ -1086,6 +1085,10 @@ function renderBusinessExpenseForm(view) {
   return '<section class="flow-group">' +
     '<h3 class="flow-group__title">' +
       (editing ? 'Edit expense' : 'Record a business expense') + '</h3>' +
+    '<p class="muted small" style="margin:-0.5rem 0 0.75rem;">' +
+      'What the company spends on itself, billed to nobody and drawn out of a pot. ' +
+      'Costs you will bill back to a client go under <strong>Hours &rarr; Client expenses</strong>.' +
+    '</p>' +
     '<form id="be-form" class="form-card" onsubmit="submitBusinessExpense(event)">' +
       '<div class="form-row">' +
         '<label>Date <input type="date" id="be-date" required value="' +
@@ -1211,13 +1214,12 @@ function renderBudgetAllocate() {
   var content = document.getElementById('budget-tab-content');
   content.innerHTML = '<div aria-busy="true">Loading invoices...</div>';
 
-  // Its own date range: AppState.dateFrom/dateTo is a global that every other
-  // page overwrites, so visiting Hours first used to shrink this to two days
-  // and report "nothing to allocate" — with no date control here to see why.
-  var range = datePreset('ytd');
-
+  // No date window at all. A paid invoice with no budget behind it is a to-do,
+  // not a period figure — the same reason the Dashboard's count ignores the
+  // filter. A window here could hide one from this tab while the Dashboard
+  // went on saying three were waiting.
   Promise.all([
-    serverCall('getInvoicesWithDetails', { dateFrom: range.from, dateTo: range.to }),
+    serverCall('getInvoicesWithDetails', {}),
     serverCall('getAllClient', 'BudgetAllocations'),
     serverCall('getBudgetRules')
   ]).then(function(results) {
@@ -1241,22 +1243,35 @@ function renderBudgetAllocate() {
       content.innerHTML =
         '<article class="empty-state">' +
           '<h3>Nothing to allocate</h3>' +
-          '<p class="muted">Every paid invoice created between ' + escapeHtml(range.from) + ' and ' +
-            escapeHtml(range.to) + ' is already allocated. Mark a new invoice as paid in the Invoices tab to allocate it here.</p>' +
+          '<p class="muted">Every paid invoice has been allocated. Mark a new invoice as paid ' +
+            'in the Invoices tab to allocate it here.</p>' +
         '</article>';
       return;
     }
 
-    if (rules.length === 0) {
+    // Pre-company rules are not offered at all. They are kept so historical
+    // allocations still read, but the cascade behind them is frozen, so an
+    // option that could only ever be refused is not an option.
+    var companyRules = rules.filter(function(r) { return ruleModelOf(r) === 'company'; });
+    var frozenCount = rules.length - companyRules.length;
+
+    if (companyRules.length === 0) {
       content.innerHTML =
         '<article class="empty-state">' +
-          '<h3>No budget rules yet</h3>' +
-          '<p class="muted">Add a budget rule under Settings &rarr; Budget Rules before allocating.</p>' +
+          '<h3>' + (rules.length === 0 ? 'No budget rules yet' : 'No company budget rule') + '</h3>' +
+          '<p class="muted">' + (frozenCount > 0
+            ? 'The ' + frozenCount + ' rule' + (frozenCount === 1 ? '' : 's') +
+              ' you have ' + (frozenCount === 1 ? 'is a' : 'are') + ' pre-company (sole trader) ' +
+              (frozenCount === 1 ? 'one' : 'ones') + '. Those are kept so historical allocations ' +
+              'still read, but new allocations cannot use them. '
+            : '') +
+            'Add a company rule under Settings &rarr; Budget Rules.</p>' +
         '</article>';
       return;
     }
 
-    var defaultRule = rules.find(function(r) { return isFlagTrue(r.is_default); }) || rules[0];
+    var defaultRule = companyRules.find(function(r) { return isFlagTrue(r.is_default); }) ||
+      companyRules[0];
 
     var invoiceOptions = eligible.map(function(inv) {
       return {
@@ -1265,12 +1280,8 @@ function renderBudgetAllocate() {
       };
     });
 
-    // Flag pre-company rules so an old cascade is never applied by accident.
-    var ruleOptions = rules.map(function(r) {
-      return {
-        id: r.rule_id,
-        label: r.name + (ruleModelOf(r) === 'company' ? '' : ' (sole trader)')
-      };
+    var ruleOptions = companyRules.map(function(r) {
+      return { id: r.rule_id, label: r.name };
     });
 
     content.innerHTML =
