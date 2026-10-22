@@ -552,54 +552,65 @@ function dashBudget(budget, potSpending) {
   var html = '<article><header><h3 style="margin:0;">Budget</h3></header>';
 
   html += dashBudgetGroup('Total revenue', 'two views of the same money — not added together', [
-    { label: 'Business', amount: businessRevenue, detail: 'invoiced by the company' },
+    { label: 'Business', amount: businessRevenue, note: 'invoiced by the company' },
     { label: 'Personal', amount: personalRevenue,
-      detail: 'owner pay ' + formatCurrency(draw.allocated) +
+      note: 'owner pay ' + formatCurrency(draw.allocated) +
         ' · sole trader ' + formatCurrency(soleTraderRevenue) }
   ]);
 
+  var owedWords = { open: 'still to pay', none: 'none of it paid yet', done: 'all paid' };
+
   html += dashBudgetGroup('Total obligations',
-    formatCurrency(bizOwed.outstanding + perOwed.outstanding) + ' still to pay', [
-      { label: 'Business', amount: bizOwed.outstanding,
-        detail: 'tax, GST, ACC · paid ' + formatCurrency(bizOwed.paid) },
-      { label: 'Personal', amount: perOwed.outstanding,
-        detail: 'tax, ACC · paid ' + formatCurrency(perOwed.paid) }
+    'set aside in total · ' +
+      formatCurrency(dashRound(bizOwed.outstanding + perOwed.outstanding)) + ' still to pay', [
+      { label: 'Business', amount: bizOwed.allocated,
+        status: dashStatus(bizOwed, owedWords),
+        note: 'tax, GST, ACC · paid ' + formatCurrency(bizOwed.paid) },
+      { label: 'Personal', amount: perOwed.allocated,
+        status: dashStatus(perOwed, owedWords),
+        note: 'tax, ACC · paid ' + formatCurrency(perOwed.paid) }
     ]);
 
   // Spend, save, invest, donate — the order asked for, keyed on the registry key
   // rather than the display label so renaming a label cannot silently zero a box.
   var DASH_ALLOCATION_ORDER = ['per_spend', 'per_save', 'per_invest', 'per_donate'];
+  var moveWords = { open: 'still to move', none: 'none of it moved yet', done: 'all moved' };
+  var allocationsLeft = 0;
   var allocationBoxes = DASH_ALLOCATION_ORDER.map(function(key) {
     var row = PERSONAL_ALLOCATIONS.find(function(r) { return r.keys[0] === key; });
     if (!row) return null;
     var figures = sum(row.keys);
-    var detail;
-    if (figures.allocated === 0) detail = 'nothing allocated yet';
-    else if (figures.outstanding > 0) detail = formatCurrency(figures.outstanding) + ' still to action';
-    else detail = 'all actioned';
-    return { label: row.label, amount: figures.allocated, detail: detail };
+    allocationsLeft += figures.outstanding;
+    return { label: row.label, amount: figures.allocated,
+      status: dashStatus(figures, moveWords),
+      // Only once there is something to report. "moved $0.00" under "none of
+      // it moved yet" is the same fact said twice.
+      note: figures.paid > 0.004 ? 'moved ' + formatCurrency(figures.paid) : '' };
   }).filter(Boolean);
-  html += dashBudgetGroup('Personal allocations', '', allocationBoxes);
+  html += dashBudgetGroup('Personal allocations',
+    'allocated in total · ' + formatCurrency(dashRound(allocationsLeft)) + ' still to move',
+    allocationBoxes);
 
   // The Reserve is a fund, not a bill: allocations fill it and operating costs
-  // draw it down, so the figure worth seeing is what is actually left. "Moved
-  // in" rather than "allocated" — an allocation you have not acted on is not
-  // money you can spend.
+  // draw it down. So it takes two boxes — what was allocated to it, on the same
+  // total-then-outstanding footing as every other box, and what is actually
+  // left once spending is taken off.
   var reserve = by.biz_reserve || { allocated: 0, paid: 0, outstanding: 0 };
   var reserveSpent = Number(spending.biz_reserve) || 0;
-  var reserveBalance = Math.round((reserve.paid - reserveSpent) * 100) / 100;
+  var reserveBalance = dashRound(reserve.paid - reserveSpent);
 
   if (reserve.allocated > 0 || reserveSpent > 0) {
     html += dashBudgetGroup('Business reserve',
-      reserveBalance < 0 ? 'overdrawn' : 'left in the pot', [
-        { label: reserveBalance < 0 ? 'Overdrawn by' : 'Balance',
+      'a pot, not a bill — allocations fill it, operating costs draw it down', [
+        { label: 'Allocated to reserve', amount: reserve.allocated,
+          status: dashStatus(reserve, { open: 'still to move in',
+            none: 'none of it moved in yet', done: 'all moved in' }),
+          note: reserve.paid > 0.004 ? formatCurrency(reserve.paid) + ' moved in' : '' },
+        { label: reserveBalance < 0 ? 'Overdrawn by' : 'Left in the pot',
           amount: Math.abs(reserveBalance),
-          detail: formatCurrency(reserve.paid) + ' moved in · ' +
-            formatCurrency(reserveSpent) + ' spent' },
-        { label: 'Still to move in', amount: reserve.outstanding,
-          detail: reserve.outstanding > 0
-            ? 'allocated but not yet in the account'
-            : 'all of it is in the account' }
+          status: { text: formatCurrency(reserveSpent) + ' spent',
+            tone: reserveBalance < 0 ? 'credit' : 'quiet' },
+          note: 'of ' + formatCurrency(reserve.paid) + ' moved in' }
       ]);
   }
 
@@ -607,20 +618,55 @@ function dashBudget(budget, potSpending) {
   return html;
 }
 
+function dashRound(n) {
+  return Math.round((Number(n) || 0) * 100) / 100;
+}
+
+/**
+ * The line under a box's headline figure.
+ *
+ * Every box reads the same way: the big number is the TOTAL the label names,
+ * and this says what is still outstanding against it. Before this, one box
+ * headlined the outstanding figure and the next headlined the total, with
+ * nothing on screen to tell them apart — the same label could mean either.
+ *
+ * `words.open` differs per group because the action does (tax is paid away,
+ * savings are moved between your own accounts). The SHAPE never differs.
+ */
+function dashStatus(figures, words) {
+  var total = dashRound(figures.allocated);
+  var left = dashRound(figures.outstanding);
+
+  if (!total && !left) return { text: 'nothing allocated yet', tone: 'quiet' };
+  // Nothing settled yet, so the figure left IS the headline. Repeating it two
+  // lines apart invites the reader to add them together.
+  if (left > 0.004 && left >= total - 0.004) return { text: words.none, tone: 'open' };
+  if (left > 0.004) return { text: formatCurrency(left) + ' ' + words.open, tone: 'open' };
+  // Overpaid: the bucket is holding money against a future allocation.
+  if (left < -0.004) return { text: formatCurrency(-left) + ' in credit', tone: 'credit' };
+  return { text: words.done, tone: 'done' };
+}
+
 function dashBudgetGroup(title, note, boxes) {
   return '<h4 class="dash-budget-group">' + escapeHtml(title) +
       (note ? ' <span class="muted small">' + escapeHtml(note) + '</span>' : '') +
     '</h4>' +
-    '<div class="dash-budget-grid">' +
-      boxes.map(function(box) {
-        return '<div class="dash-budget-item">' +
-          '<div class="dash-budget-item__header">' +
-            '<span>' + escapeHtml(box.label) + '</span>' +
-            '<span class="dash-budget-item__amount">' + formatCurrency(box.amount || 0) + '</span>' +
-          '</div>' +
-          '<div class="dash-budget-item__detail"><span>' + escapeHtml(box.detail || '') + '</span></div>' +
-        '</div>';
-      }).join('') +
-    '</div>';
+    '<div class="dash-budget-grid">' + boxes.map(dashBudgetBox).join('') + '</div>';
+}
+
+function dashBudgetBox(box) {
+  return '<div class="dash-budget-item">' +
+    '<div class="dash-budget-item__header">' +
+      '<span>' + escapeHtml(box.label) + '</span>' +
+      '<span class="dash-budget-item__amount">' + formatCurrency(box.amount || 0) + '</span>' +
+    '</div>' +
+    (box.status
+      ? '<div class="dash-budget-item__status dash-budget-item__status--' + box.status.tone + '">' +
+          escapeHtml(box.status.text) + '</div>'
+      : '') +
+    (box.note
+      ? '<div class="dash-budget-item__detail"><span>' + escapeHtml(box.note) + '</span></div>'
+      : '') +
+  '</div>';
 }
 </script>

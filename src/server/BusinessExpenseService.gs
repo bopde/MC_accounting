@@ -203,6 +203,12 @@ function getBusinessExpenses(params) {
  * sitting there to spend.
  */
 function getBusinessExpenseView(params) {
+  return withSheetCache(function() { return buildBusinessExpenseView(params); });
+}
+
+function buildBusinessExpenseView(params) {
+  // Three of these used to read BusinessExpenses separately, and two of them
+  // BudgetAllocations. Inside one cache block the sheet is fetched once.
   var summary = getBudgetSummary(params);
   var spending = potSpending(params);
 

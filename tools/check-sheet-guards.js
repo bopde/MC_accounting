@@ -39,6 +39,7 @@ function makeSheet(name, headers, rows) {
     getLastRow: function() { return grid.length; },
     getLastColumn: function() { return grid.reduce(function(m, r) { return Math.max(m, r.length); }, 0); },
     setFrozenRows: function() { return this; },
+    deleteRow: function(rowIndex) { grid.splice(rowIndex - 1, 1); },
     _grid: grid,
     getDataRange: function() {
       const width = grid.reduce(function(m, r) { return Math.max(m, r.length); }, 0);
@@ -599,6 +600,127 @@ check('a payment write against an un-migrated sheet throws rather than dropping 
       created_date: '2026-06-05'
     });
   }, 'covered');
+});
+
+section('Request-scoped sheet cache');
+
+// Counts the reads that actually reach the spreadsheet, so these assert about
+// round trips rather than about the cache's own bookkeeping.
+function countingSpreadsheet(sheets) {
+  const ss = makeSpreadsheet(sheets);
+  ss.__reads = {};
+  const inner = ss.getSheetByName;
+  ss.getSheetByName = function(n) {
+    const sheet = inner.call(ss, n);
+    if (!sheet || sheet.__counted) return sheet;
+    sheet.__counted = true;
+    const getDataRange = sheet.getDataRange.bind(sheet);
+    sheet.getDataRange = function() {
+      ss.__reads[n] = (ss.__reads[n] || 0) + 1;
+      return getDataRange();
+    };
+    return sheet;
+  };
+  return ss;
+}
+
+function freshBooks() {
+  return countingSpreadsheet({
+    Businesses: makeSheet('Businesses', ['business_id', 'name', 'active'],
+      [['BIZ-001', 'Acme', true]])
+  });
+}
+
+check('outside a block every read goes to the spreadsheet', function() {
+  app.__ss = freshBooks();
+  app.getAll('Businesses');
+  app.getAll('Businesses');
+  eq(app.__ss.__reads.Businesses, 2, 'reads');
+});
+
+check('inside a block the same sheet is fetched once', function() {
+  app.__ss = freshBooks();
+  app.withSheetCache(function() {
+    app.getAll('Businesses');
+    app.getAll('Businesses');
+    app.getAll('Businesses');
+  });
+  eq(app.__ss.__reads.Businesses, 1, 'reads');
+});
+
+check('and the block does not leak past its own end', function() {
+  app.__ss = freshBooks();
+  app.withSheetCache(function() { app.getAll('Businesses'); });
+  app.getAll('Businesses');
+  eq(app.__ss.__reads.Businesses, 2, 'reads');
+});
+
+// The hazard a cache of ROW OBJECTS would have: findById hands a row to the
+// caller, the caller sets fields on it, and the next reader sees the edit
+// before it was written. Caching cell values instead makes that impossible.
+check('each caller gets its own row objects, not a shared one', function() {
+  app.__ss = freshBooks();
+  app.withSheetCache(function() {
+    const first = app.getAll('Businesses')[0];
+    first.name = 'SCRIBBLED ON';
+    eq(app.getAll('Businesses')[0].name, 'Acme', 'second read');
+  });
+});
+
+check('a write inside a block is visible to the next read in it', function() {
+  app.__ss = freshBooks();
+  app.withSheetCache(function() {
+    eq(app.getAll('Businesses').length, 1, 'before');
+    app.appendRow('Businesses', { business_id: 'BIZ-002', name: 'Beta', active: true });
+    const after = app.getAll('Businesses');
+    eq(after.length, 2, 'after append');
+    eq(after[1].name, 'Beta', 'appended row');
+
+    const row = app.findById('Businesses', 'BIZ-002');
+    row.name = 'Beta Corp';
+    app.updateRow('Businesses', row._rowIndex, row);
+    eq(app.findById('Businesses', 'BIZ-002').name, 'Beta Corp', 'after update');
+
+    app.deleteRow('Businesses', row._rowIndex);
+    eq(app.getAll('Businesses').length, 1, 'after delete');
+  });
+});
+
+check('a nested block joins the outer one instead of ending it early', function() {
+  app.__ss = freshBooks();
+  app.withSheetCache(function() {
+    app.withSheetCache(function() { app.getAll('Businesses'); });
+    // If the inner block had cleared the cache on exit, this would read again.
+    app.getAll('Businesses');
+  });
+  eq(app.__ss.__reads.Businesses, 1, 'reads');
+});
+
+check('a throw inside a block still closes it', function() {
+  app.__ss = freshBooks();
+  try {
+    app.withSheetCache(function() {
+      app.getAll('Businesses');
+      throw new Error('boom');
+    });
+  } catch (e) { /* expected */ }
+  app.getAll('Businesses');
+  eq(app.__ss.__reads.Businesses, 2, 'reads');
+});
+
+check('the views that render a page open one', function() {
+  // From the source on disk, not from the loaded context: DashboardService.gs
+  // is not one of the files this harness loads, and String(undefined) would
+  // sail past the test rather than failing it.
+  [['BudgetService.gs', 'getBudgetSummary'],
+    ['BusinessExpenseService.gs', 'getBusinessExpenseView'],
+    ['DashboardService.gs', 'getDashboardData']].forEach(function(pair) {
+    const text = fs.readFileSync(path.join(ROOT, 'src', 'server', pair[0]), 'utf8');
+    const body = new RegExp('function ' + pair[1] + '\\(params\\) \\{([\\s\\S]{0,400}?)\\n\\}')
+      .exec(text);
+    eq(!!body, true, pair[1] + ' found');
+    eq(/withSheetCache/.test(body[1]), true, pair[1] + ' opens a cache block');
+  });
 });
 
 console.log('\n' + passes + ' passed, ' + failures + ' failed');

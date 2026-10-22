@@ -821,5 +821,85 @@ check('an unpaid or voided invoice is not waiting for anything', function() {
   eq(app.getDashboardData({}).pendingAllocation.count, 0, 'nor a voided one');
 });
 
+section('The Allocate tab, assembled on the server');
+
+// A pre-company rule, kept so historical allocations still read. It must never
+// be offered for a NEW allocation — the cascade behind it is frozen.
+const FROZEN_RULE = {
+  rule_id: 'BR-000', name: 'Old Split', model: '', is_default: false, active: true,
+  tax_withheld_pct: 0.1, tax_to_pay_pct: 0.28, acc_withheld_pct: 0, acc_to_pay_pct: 0.02,
+  donate_pct: 0.05, save_pct: 0.10, invest_pct: 0.15, spend_pct: 0.70
+};
+
+function twoPaidInvoices() {
+  build({
+    Businesses: [BUSINESS],
+    WorkCodes: [{ code_id: 'DEV', description: 'Development', category: 'billable', active: true }],
+    BudgetRules: [RULE, FROZEN_RULE],
+    TimeEntries: [entry('TE-001', '2026-02-04', 'DEV', 150, 10),
+      entry('TE-002', '2026-03-04', 'DEV', 150, 8)]
+  });
+  app.generateInvoice({ businessId: 'BIZ-001', dateFrom: '2026-02-01', dateTo: '2026-02-28',
+    includeGst: false });
+  app.generateInvoice({ businessId: 'BIZ-001', dateFrom: '2026-03-01', dateTo: '2026-03-31',
+    includeGst: false });
+  ['AT0226', 'AT0326'].forEach(function(id) {
+    app.updateInvoiceStatus(id, 'sent');
+    app.updateInvoiceStatus(id, 'paid');
+  });
+}
+
+check('it offers every paid invoice that has no budget behind it', function() {
+  twoPaidInvoices();
+  const view = app.getBudgetAllocateView();
+  eq(view.invoices.length, 2, 'eligible');
+  eq(view.invoices.map(function(i) { return i.invoice_id; }).sort().join(','),
+    'AT0226,AT0326', 'ids');
+});
+
+check('and drops one the moment it is allocated', function() {
+  twoPaidInvoices();
+  app.allocateBudget('AT0226', 'BR-001');
+  const ids = app.getBudgetAllocateView().invoices.map(function(i) { return i.invoice_id; });
+  eq(ids.join(','), 'AT0326', 'remaining');
+});
+
+check('an invoice that has not been paid is not on the list', function() {
+  twoPaidInvoices();
+  app.updateInvoiceStatus('AT0326', 'void');
+  const ids = app.getBudgetAllocateView().invoices.map(function(i) { return i.invoice_id; });
+  eq(ids.join(','), 'AT0226', 'remaining');
+});
+
+check('only company rules are offered, and the frozen ones are counted', function() {
+  twoPaidInvoices();
+  const view = app.getBudgetAllocateView();
+  eq(view.rules.length, 1, 'offered');
+  eq(view.rules[0].rule_id, 'BR-001', 'which one');
+  eq(view.rules[0].is_default, true, 'default flag survives the trip');
+  eq(view.frozenCount, 1, 'frozen');
+  eq(view.ruleCount, 2, 'total');
+});
+
+check('the picker carries what the form renders, and nothing more', function() {
+  twoPaidInvoices();
+  const inv = app.getBudgetAllocateView().invoices[0];
+  eq(Object.keys(inv).sort().join(','),
+    'business_name,currency,invoice_id,total', 'invoice fields');
+  eq(inv.business_name, 'Auckland Transport', 'business name resolved server-side');
+  eq(typeof inv.total, 'number', 'total');
+});
+
+check('an inactive rule is not offered, a blank active flag still is', function() {
+  twoPaidInvoices();
+  const rules = app.getAll('BudgetRules');
+  const old = rules.filter(function(r) { return r.rule_id === 'BR-000'; })[0];
+  old.active = false;
+  app.updateRow('BudgetRules', old._rowIndex, old);
+  const view = app.getBudgetAllocateView();
+  eq(view.ruleCount, 1, 'only the active one counts');
+  eq(view.frozenCount, 0, 'and nothing frozen is left to mention');
+});
+
 console.log('\n' + passes + ' passed, ' + failures + ' failed');
 process.exit(failures > 0 ? 1 : 0);

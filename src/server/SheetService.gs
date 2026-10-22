@@ -54,15 +54,69 @@ function sanitiseCell(val) {
 }
 
 /**
- * Get all rows from a sheet as an array of objects.
- * Keys are taken from the header row.
+ * Memoise sheet reads for the span of one request.
+ *
+ * getAll() goes to the spreadsheet on every call, and one page load asks for
+ * the same sheet several times over: the Business Expenses tab read
+ * BusinessExpenses three times and BudgetAllocations twice. Each of those is a
+ * round trip, and round trips are most of what is felt as load time.
+ *
+ * Scoped rather than global on purpose. Inside the block reads are cached;
+ * outside it nothing changes at all. Only the read-only view functions open a
+ * block, so the migrations in Setup.gs and the id backfill in InvoiceService —
+ * which write through the sheet API directly, with no chance to invalidate —
+ * are never inside one.
  */
-function getAll(sheetName) {
+var _sheetCache = null;
+
+function withSheetCache(fn) {
+  // Already inside a block: join it rather than opening a second one, and do
+  // not drop it on the way out — the outer caller is still using it.
+  if (_sheetCache) return fn();
+
+  _sheetCache = {};
+  try {
+    return fn();
+  } finally {
+    _sheetCache = null;
+  }
+}
+
+/** Drop a sheet's cached values, or all of them when called with no name. */
+function invalidateSheetCache(sheetName) {
+  if (!_sheetCache) return;
+  if (sheetName === undefined) _sheetCache = {};
+  else delete _sheetCache[sheetName];
+}
+
+/**
+ * The raw cell values for a sheet.
+ *
+ * The CACHE HOLDS CELL VALUES, not the row objects getAll builds from them.
+ * That is the whole safety argument: callers mutate the objects they are given
+ * (findById hands one to updateRow after setting fields on it), and a cache of
+ * objects would hand the next caller that half-edited row.
+ */
+function sheetValues(sheetName) {
+  if (_sheetCache && Object.prototype.hasOwnProperty.call(_sheetCache, sheetName)) {
+    return _sheetCache[sheetName];
+  }
+
   var ss = getSpreadsheet();
   var sheet = ss.getSheetByName(sheetName);
   if (!sheet) throw new Error('Sheet not found: ' + sheetName);
 
   var data = sheet.getDataRange().getValues();
+  if (_sheetCache) _sheetCache[sheetName] = data;
+  return data;
+}
+
+/**
+ * Get all rows from a sheet as an array of objects.
+ * Keys are taken from the header row.
+ */
+function getAll(sheetName) {
+  var data = sheetValues(sheetName);
   if (data.length <= 1) return [];
 
   var headers = data[0];
@@ -165,6 +219,7 @@ function appendRow(sheetName, data) {
     sheet.getRange(newRow, 1).setNumberFormat('@');
     sheet.getRange(newRow, 1, 1, row.length).setValues([row]);
     data._rowIndex = newRow;
+    invalidateSheetCache(sheetName);
 
     return data;
   });
@@ -186,6 +241,7 @@ function updateRow(sheetName, rowIndex, data) {
   });
 
   sheet.getRange(rowIndex, 1, 1, row.length).setValues([row]);
+  invalidateSheetCache(sheetName);
   return data;
 }
 
@@ -197,6 +253,7 @@ function deleteRow(sheetName, rowIndex) {
   var sheet = ss.getSheetByName(sheetName);
   if (!sheet) throw new Error('Sheet not found: ' + sheetName);
   sheet.deleteRow(rowIndex);
+  invalidateSheetCache(sheetName);
 }
 
 /**

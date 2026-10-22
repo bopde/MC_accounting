@@ -77,6 +77,9 @@ let seq = 100;
 Object.assign(srv, {
   LockService: { getScriptLock: function() { return { waitLock: function() {}, releaseLock: function() {} }; } },
   withScriptLock: function(fn) { return fn(); },
+  // Pass-through: the real one memoises sheet reads, which these fixtures do
+  // not have. Its own behaviour is covered in check-sheet-guards.js.
+  withSheetCache: function(fn) { return fn(); },
   getAll: function(n) { return (db[n] || []).map(function(r) { return Object.assign({}, r); }); },
   findById: function(n, id) {
     const rows = db[n] || [];
@@ -191,6 +194,11 @@ function check(label, cond) {
 }
 
 function money(s) { return Number(String(s).replace(/[^0-9.-]/g, '')); }
+
+/** '$1,234.50' from 1234.5 — to look for a headline inside a status line. */
+function formatMoney(n) {
+  return '$' + Number(n).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+}
 function sectionTotal(label) {
   const m = new RegExp(label + ' <span class="section-total">([^<]+)').exec(html);
   return m ? money(m[1]) : NaN;
@@ -411,9 +419,79 @@ const dashAmounts = Array.from(dash.matchAll(/dash-budget-item__amount">([^<]+)/
   .map(function(m) { return money(m[1]); });
 check('business revenue matches the Budget page (5750), got ' + dashAmounts[0], dashAmounts[0] === 5750);
 check('personal revenue matches the Budget page (4050), got ' + dashAmounts[1], dashAmounts[1] === 4050);
-check('obligations split business/personal, outstanding only — ' +
+check('obligations split business/personal, headlining the TOTAL set aside — ' +
   dashAmounts[2] + ' / ' + dashAmounts[3],
-  dashAmounts[2] === 1450 && dashAmounts[3] === 1035.93);
+  dashAmounts[2] === 2200 && dashAmounts[3] === 1335.93);
+// Every box, as it is actually rendered: label, headline figure, and the one
+// line under it. Parsed back out of the markup rather than recomputed, so a
+// box that says something different from what it was handed still fails.
+function dashBoxes(markup) {
+  const re = new RegExp(
+    '<div class="dash-budget-item">\\s*<div class="dash-budget-item__header">' +
+    '<span>([^<]*)</span>' +
+    '<span class="dash-budget-item__amount">([^<]*)</span></div>' +
+    '(?:<div class="dash-budget-item__status dash-budget-item__status--([a-z]+)">([^<]*)</div>)?',
+    'g');
+  return Array.from(markup.matchAll(re)).map(function(m) {
+    return { label: m[1], amount: money(m[2]), tone: m[3] || '', status: m[4] || '' };
+  });
+}
+// Scoped to one group: 'Business' labels a revenue box AND an obligations box,
+// and asserting against whichever came last is how the two quietly swap.
+function groupBoxes(title, next) {
+  const after = dash.split(title)[1] || '';
+  const map = {};
+  dashBoxes(next ? after.split(next)[0] : after)
+    .forEach(function(b) { map[b.label] = b; });
+  return map;
+}
+const owedBox = groupBoxes('Total obligations', 'Personal allocations');
+
+check('the outstanding figure is the line underneath, not the headline',
+  owedBox.Business.amount === 2200 &&
+  owedBox.Business.status === '$1,450.00 still to pay' &&
+  owedBox.Business.tone === 'open');
+check('the same shape on the personal side',
+  owedBox.Personal.amount === 1335.93 &&
+  owedBox.Personal.status === '$1,035.93 still to pay');
+
+function stillTo(box) {
+  const m = /^\$([\d,.]+) still to/.exec(box.status);
+  return m ? money(m[1]) : null;
+}
+check('what is left is never more than the total above it',
+  dashBoxes(dash).every(function(b) {
+    const left = stillTo(b);
+    return left === null || left <= b.amount + 0.004;
+  }));
+// The invariant above holds trivially if the headline IS the outstanding
+// figure, so this is the half that catches the bug: wherever something has
+// been paid, the headline must be strictly the larger of the two.
+check('a part-paid box headlines the total, not what is left',
+  dashBoxes(dash).filter(function(b) {
+    const left = stillTo(b);
+    return left !== null && left < b.amount - 0.004;
+  }).length >= 2);
+check('every box that can be outstanding says so in the same shape',
+  dashBoxes(dash).filter(function(b) { return b.status; }).length >= 7);
+check('the convention is stated on the group, not left to be inferred',
+  dash.indexOf('set aside in total') !== -1 &&
+  dash.indexOf('allocated in total') !== -1);
+
+// A pot with some of it already moved: the case the old layout got wrong,
+// where headlining the outstanding figure made Save look smaller than it was.
+const partPaid = dashData.map(function(c) {
+  if (c.key !== 'per_save') return c;
+  return Object.assign({}, c, { paid: 100, outstanding: Math.round((c.allocated - 100) * 100) / 100 });
+});
+const partPaidHtml = cli.dashBudget(partPaid, {});
+const saveBox = dashBoxes(partPaidHtml).filter(function(b) { return b.label === 'Save'; })[0];
+check('a part-paid pot headlines what was allocated, not what is left',
+  saveBox.amount === 271.41 && saveBox.status === '$171.41 still to move',
+  JSON.stringify(saveBox));
+check('and says how much has moved already',
+  partPaidHtml.indexOf('moved $100.00') !== -1);
+
 check('four personal allocation boxes in spend/save/invest/donate order',
   /Spend[\s\S]*?Save[\s\S]*?Invest[\s\S]*?Donate/.test(dash.split('Personal allocations')[1]));
 // Bounded, not open-ended: groups are appended after this one, and an
@@ -431,7 +509,16 @@ check('it reports the balance, overdrawn when spending outran what moved in',
   /Overdrawn by<\/span><span class="dash-budget-item__amount">\$180\.00/.test(dash),
   (/Business reserve[\s\S]{0,400}/.exec(dash) || [''])[0]);
 check('and says how much is allocated but not yet in the account',
-  /Still to move in<\/span><span class="dash-budget-item__amount">\$500\.00/.test(dash));
+  /Allocated to reserve<\/span><span class="dash-budget-item__amount">\$500\.00/.test(dash) &&
+  dash.indexOf('none of it moved in yet') !== -1);
+// With nothing settled the outstanding figure IS the total, and printing it
+// twice two lines apart invites the reader to add them together.
+check('a box with nothing settled does not print its figure twice',
+  dashBoxes(dash).every(function(b) {
+    const headline = formatMoney(b.amount);
+    return !b.status || b.status.indexOf(headline) === -1 || b.status.indexOf('spent') !== -1;
+  }),
+  JSON.stringify(dashBoxes(dash).map(function(b) { return b.amount + ' / ' + b.status; })));
 check('the Reserve figure never contradicts the Budget page',
   cli.catOf(cats, 'biz_reserve').outstanding === 500);
 

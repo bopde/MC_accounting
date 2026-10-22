@@ -86,6 +86,9 @@ Object.assign(app, {
   // Real implementation lives in SheetService.gs, which is not loaded here
   // because it is all Google API calls. Single-threaded, so pass-through.
   withScriptLock: function(fn) { return fn(); },
+  // Pass-through: the real one memoises sheet reads, which these fixtures do
+  // not have. Its own behaviour is covered in check-sheet-guards.js.
+  withSheetCache: function(fn) { return fn(); },
   getByDateParams: function(name, col, params) {
     if (typeof params === 'object' && params !== null) {
       if (!params.dateFrom && !params.dateTo) return app.getAll(name);

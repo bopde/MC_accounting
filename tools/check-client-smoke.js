@@ -251,6 +251,16 @@ getInvoicesWithDetails: [INVOICE, UNALLOCATED_INVOICE],
   undoBudgetPaymentFromClient: { success: true, amount: 750, category: 'GST' },
   deallocateInvoiceFromClient: { success: true, removed: 11, invoice_id: 'BC0526' },
   getBudgetRules: [RULE, LEGACY_RULE],
+  // What getBudgetAllocateView returns: the matching and the company-rule
+  // filter happen on the server now, so the fixture is already narrowed.
+  // That the server narrows it correctly is asserted in check-app-flows.js.
+  getBudgetAllocateView: {
+    invoices: [{ invoice_id: 'BC0626', business_name: "Bob's Consulting",
+      total: 5750, currency: 'NZD' }],
+    rules: [{ rule_id: RULE.rule_id, name: RULE.name, is_default: true }],
+    ruleCount: 2,
+    frozenCount: 1
+  },
   getAllBusinesses: [BUSINESS],
   getAccountSummariesForMonth: { current: [], previous: [] },
   getYearOverview: { accounts: [ACCOUNT], months: [], rows: [] },
@@ -399,10 +409,11 @@ async function drive(label, fn) {
   await drive('invoices > create', function() { cli.showInvoiceTab('create'); });
   await drive('invoices > list', function() { cli.showInvoiceTab('list'); });
   await drive('budget > allocate', function() { cli.showBudgetTab('allocate'); });
-  check('the allocate picker offers only company rules',
+  check('the allocate picker renders the rules the server offered',
     (function() {
       const html = doc.getElementById('budget-tab-content').innerHTML;
-      return html.indexOf('Company Default') !== -1 && html.indexOf('Old Split') === -1;
+      return html.indexOf('Company Default') !== -1 && html.indexOf('Old Split') === -1 &&
+        html.indexOf('BC0626') !== -1;
     })(), doc.getElementById('budget-tab-content').innerHTML.slice(0, 300));
   await drive('budget > money flow', function() { cli.showBudgetTab('summary'); });
   await drive('budget > business expenses', function() { cli.showBudgetTab('expenses'); });
@@ -548,11 +559,14 @@ async function drive(label, fn) {
   await drive('allocate tab', function() { cli.showBudgetTab('allocate'); });
   check('the allocate tab asks for every invoice, with no window at all', (function() {
     const call = calls.slice(beforeAllocate)
-      .find(function(c) { return c.name === 'getInvoicesWithDetails'; });
+      .find(function(c) { return c.name === 'getBudgetAllocateView'; });
     if (!call) return false;
     const a = call.args || {};
     return !a.dateFrom && !a.dateTo;
   })());
+  check('and gets the whole tab in one round trip, not three',
+    calls.slice(beforeAllocate).length === 1,
+    JSON.stringify(calls.slice(beforeAllocate).map(function(c) { return c.name; })));
 
   console.log('\nThe allocation nudge');
   check('it says how many are waiting, and what they are worth',

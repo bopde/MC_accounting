@@ -44,6 +44,9 @@ const businesses = [
 
 Object.assign(srv, {
   withScriptLock: function(fn) { return fn(); },
+  // Pass-through: the real one memoises sheet reads, which these fixtures do
+  // not have. Its own behaviour is covered in check-sheet-guards.js.
+  withSheetCache: function(fn) { return fn(); },
   // Real implementation is in SheetService.gs, which is not loaded here.
   dateOnly: function(val) {
     if (!val) return '';

@@ -747,6 +747,62 @@ function formatMoneyPlain(amount) {
 }
 
 /**
+ * Everything the Allocate tab needs, in one round trip.
+ *
+ * It used to take three: every paid invoice with its details, the whole
+ * BudgetAllocations sheet, and every budget rule — with the matching done in
+ * the browser. Three executions to start, and the entire allocations sheet
+ * crossing the bridge to answer one question: which invoices are not on it.
+ * Only the four fields the form renders come back now.
+ *
+ * No date window, deliberately. A paid invoice with no budget behind it is a
+ * to-do, not a period figure — the same reason the Dashboard's count ignores
+ * the filter. A window here could hide one from this tab while the Dashboard
+ * went on saying three were waiting.
+ */
+function getBudgetAllocateView() {
+  return withSheetCache(function() {
+    var allocated = {};
+    getAll('BudgetAllocations').forEach(function(a) {
+      allocated[normalizeId(a.invoice_id)] = true;
+    });
+
+    var invoices = getInvoicesWithDetails({}).filter(function(inv) {
+      return inv.status === 'paid' && !allocated[normalizeId(inv.invoice_id)];
+    }).map(function(inv) {
+      return {
+        invoice_id: inv.invoice_id,
+        business_name: inv.business_name,
+        total: Number(inv.total) || 0,
+        currency: inv.currency || 'NZD'
+      };
+    });
+
+    // A blank `active` is a rule written before the column existed, not an
+    // inactive one — same reading as the Settings page.
+    var rules = getBudgetRules().filter(function(r) {
+      return isTruthy(r.active) || r.active === '' ||
+        r.active === undefined || r.active === null;
+    });
+
+    // Pre-company rules are not offered at all. They are kept so historical
+    // allocations still read, but the cascade behind them is frozen, so an
+    // option that could only ever be refused is not an option. The count comes
+    // back so the empty state can say why there is nothing to choose.
+    var companyRules = rules.filter(function(r) { return ruleModel(r) === MODEL_COMPANY; });
+
+    return {
+      invoices: invoices,
+      rules: companyRules.map(function(r) {
+        return { rule_id: r.rule_id, name: r.name, is_default: isTruthy(r.is_default) };
+      }),
+      ruleCount: rules.length,
+      frozenCount: rules.length - companyRules.length
+    };
+  });
+}
+
+/**
  * Get budget summary across all invoices, grouped by scope.
  *
  * Owner Pay is reported separately as `bridge` and excluded from every money
@@ -754,6 +810,13 @@ function formatMoneyPlain(amount) {
  * would double every personal dollar.
  */
 function getBudgetSummary(params) {
+  // One block for the whole summary: Invoices, BudgetAllocations, Businesses,
+  // BudgetPayments and BusinessExpenses are each read once instead of once per
+  // helper that wants them.
+  return withSheetCache(function() { return buildBudgetSummary(params); });
+}
+
+function buildBudgetSummary(params) {
   var invoices = getByDateParams('Invoices', 'created_date', params);
   var isFiltered = isFilteringParams(params);
 
