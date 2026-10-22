@@ -75,7 +75,7 @@ function renderDashContent() {
   html += '<div id="dash-chart-area">' + dashChart(timeEntries, bizMap) + '</div>';
   html += dashContracts(contractProgress, data.unattributedTime);
   if (data.budget && data.budget.length > 0) {
-    html += dashBudget(data.budget);
+    html += dashBudget(data.budget, data.potSpending);
   }
   html += dashStatusTiles(invoices);
 
@@ -490,7 +490,8 @@ function dashContracts(contracts, unattributed) {
  * page includes first. Duplicating the key lists here is how the two screens
  * would drift apart.
  */
-function dashBudget(budget) {
+function dashBudget(budget, potSpending) {
+  var spending = potSpending || {};
   var by = {};
   (budget || []).forEach(function(cat) { by[cat.key] = cat; });
 
@@ -558,6 +559,28 @@ function dashBudget(budget) {
     return { label: row.label, amount: figures.allocated, detail: detail };
   }).filter(Boolean);
   html += dashBudgetGroup('Personal allocations', '', allocationBoxes);
+
+  // The Reserve is a fund, not a bill: allocations fill it and operating costs
+  // draw it down, so the figure worth seeing is what is actually left. "Moved
+  // in" rather than "allocated" — an allocation you have not acted on is not
+  // money you can spend.
+  var reserve = by.biz_reserve || { allocated: 0, paid: 0, outstanding: 0 };
+  var reserveSpent = Number(spending.biz_reserve) || 0;
+  var reserveBalance = Math.round((reserve.paid - reserveSpent) * 100) / 100;
+
+  if (reserve.allocated > 0 || reserveSpent > 0) {
+    html += dashBudgetGroup('Business reserve',
+      reserveBalance < 0 ? 'overdrawn' : 'left in the pot', [
+        { label: reserveBalance < 0 ? 'Overdrawn by' : 'Balance',
+          amount: Math.abs(reserveBalance),
+          detail: formatCurrency(reserve.paid) + ' moved in · ' +
+            formatCurrency(reserveSpent) + ' spent' },
+        { label: 'Still to move in', amount: reserve.outstanding,
+          detail: reserve.outstanding > 0
+            ? 'allocated but not yet in the account'
+            : 'all of it is in the account' }
+      ]);
+  }
 
   html += '</article>';
   return html;

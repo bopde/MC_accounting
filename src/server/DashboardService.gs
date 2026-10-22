@@ -193,6 +193,9 @@ function getDashboardData(params) {
     budget: budget,
     accountBalances: accountBalances,
     contractProgress: contractProgress,
+    // What has been spent out of each pot, so the Reserve can be shown as the
+    // ledger it is rather than as the figure that was allocated to it.
+    potSpending: potSpending(params),
     // Untagged time that two or more overlapping contracts could each claim.
     // Counted against none of them, and reported so the gap is visible rather
     // than looking like work that was never logged.

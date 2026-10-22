@@ -400,7 +400,7 @@ const dashData = srv.allCategoryDefs().map(function(def) {
   };
 }).filter(function(c) { return c.allocated > 0; });
 
-const dash = cli.dashBudget(dashData);
+const dash = cli.dashBudget(dashData, { biz_reserve: 180 });
 
 check('three groups render', ['Total revenue', 'Total obligations', 'Personal allocations']
   .every(function(t) { return dash.indexOf(t) !== -1; }));
@@ -416,9 +416,28 @@ check('obligations split business/personal, outstanding only — ' +
   dashAmounts[2] === 1450 && dashAmounts[3] === 1035.93);
 check('four personal allocation boxes in spend/save/invest/donate order',
   /Spend[\s\S]*?Save[\s\S]*?Invest[\s\S]*?Donate/.test(dash.split('Personal allocations')[1]));
+// Bounded, not open-ended: groups are appended after this one, and an
+// open slice quietly starts asserting about whatever is added next.
 check('allocation amounts match the Budget page buckets',
-  dashAmounts.slice(4).join(',') === '1899.85,271.41,407.11,135.7');
+  dashAmounts.slice(4, 8).join(',') === '1899.85,271.41,407.11,135.7',
+  dashAmounts.join(' | '));
 check('no undefined or NaN in the dashboard tile', !/undefined|NaN/.test(dash));
+
+// The Reserve is a fund: what is left is paid-in less spent, not what was
+// allocated to it. The fixture allocated 500, none of it moved, 180 spent.
+check('the reserve is shown as a ledger, not as what was allocated',
+  dash.indexOf('Business reserve') !== -1);
+check('it reports the balance, overdrawn when spending outran what moved in',
+  /Overdrawn by<\/span><span class="dash-budget-item__amount">\$180\.00/.test(dash),
+  (/Business reserve[\s\S]{0,400}/.exec(dash) || [''])[0]);
+check('and says how much is allocated but not yet in the account',
+  /Still to move in<\/span><span class="dash-budget-item__amount">\$500\.00/.test(dash));
+check('the Reserve figure never contradicts the Budget page',
+  cli.catOf(cats, 'biz_reserve').outstanding === 500);
+
+// With nothing allocated and nothing spent there is nothing to say.
+const quiet = cli.dashBudget(dashData.filter(function(c) { return c.key !== 'biz_reserve'; }), {});
+check('no reserve group when there is no reserve', quiet.indexOf('Business reserve') === -1);
 check('dashboard reuses the Budget page groupings, not its own copies',
   typeof cli.BIZ_OBLIGATIONS !== 'undefined' && typeof cli.PERSONAL_ALLOCATIONS !== 'undefined');
 
