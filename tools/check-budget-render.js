@@ -28,7 +28,7 @@ const ROOT = path.resolve(__dirname, '..');
 
 const srv = { Logger: { log: function() {} } };
 vm.createContext(srv);
-vm.runInContext(['BudgetCategories.gs', 'BudgetService.gs']
+vm.runInContext(['BudgetCategories.gs', 'BudgetService.gs', 'BusinessExpenseService.gs']
   .map(function(f) { return fs.readFileSync(path.join(ROOT, 'src', 'server', f), 'utf8'); })
   .join('\n'), srv, { filename: 'budget-service.js' });
 
@@ -400,7 +400,7 @@ const dashData = srv.allCategoryDefs().map(function(def) {
   };
 }).filter(function(c) { return c.allocated > 0; });
 
-const dash = cli.dashBudget(dashData);
+const dash = cli.dashBudget(dashData, { biz_reserve: 180 });
 
 check('three groups render', ['Total revenue', 'Total obligations', 'Personal allocations']
   .every(function(t) { return dash.indexOf(t) !== -1; }));
@@ -416,9 +416,28 @@ check('obligations split business/personal, outstanding only — ' +
   dashAmounts[2] === 1450 && dashAmounts[3] === 1035.93);
 check('four personal allocation boxes in spend/save/invest/donate order',
   /Spend[\s\S]*?Save[\s\S]*?Invest[\s\S]*?Donate/.test(dash.split('Personal allocations')[1]));
+// Bounded, not open-ended: groups are appended after this one, and an
+// open slice quietly starts asserting about whatever is added next.
 check('allocation amounts match the Budget page buckets',
-  dashAmounts.slice(4).join(',') === '1899.85,271.41,407.11,135.7');
+  dashAmounts.slice(4, 8).join(',') === '1899.85,271.41,407.11,135.7',
+  dashAmounts.join(' | '));
 check('no undefined or NaN in the dashboard tile', !/undefined|NaN/.test(dash));
+
+// The Reserve is a fund: what is left is paid-in less spent, not what was
+// allocated to it. The fixture allocated 500, none of it moved, 180 spent.
+check('the reserve is shown as a ledger, not as what was allocated',
+  dash.indexOf('Business reserve') !== -1);
+check('it reports the balance, overdrawn when spending outran what moved in',
+  /Overdrawn by<\/span><span class="dash-budget-item__amount">\$180\.00/.test(dash),
+  (/Business reserve[\s\S]{0,400}/.exec(dash) || [''])[0]);
+check('and says how much is allocated but not yet in the account',
+  /Still to move in<\/span><span class="dash-budget-item__amount">\$500\.00/.test(dash));
+check('the Reserve figure never contradicts the Budget page',
+  cli.catOf(cats, 'biz_reserve').outstanding === 500);
+
+// With nothing allocated and nothing spent there is nothing to say.
+const quiet = cli.dashBudget(dashData.filter(function(c) { return c.key !== 'biz_reserve'; }), {});
+check('no reserve group when there is no reserve', quiet.indexOf('Business reserve') === -1);
 check('dashboard reuses the Budget page groupings, not its own copies',
   typeof cli.BIZ_OBLIGATIONS !== 'undefined' && typeof cli.PERSONAL_ALLOCATIONS !== 'undefined');
 
@@ -497,6 +516,73 @@ cli.renderInvoiceDetail({
 });
 check('no PO line when there is no PO', printed.indexOf('PO #:') === -1);
 check('the invoice still renders without one', printed.indexOf('BC0626') !== -1);
+
+// --- Services and expenses are never conflated ---
+
+console.log('\nServices and expenses on the invoice');
+
+// $12,000 of time plus $240.50 of expenses recovered at cost. GST is on the
+// services only, so the two are different kinds of money and only one of them
+// is income — reading the combined subtotal for tax overstates earnings by
+// whatever was spent on the client's behalf.
+printed = '';
+cli.renderInvoiceDetail({
+  invoice: { invoice_id: 'AT0726', created_date: '2026-07-31', date_from: '2026-07-01',
+    date_to: '2026-07-31', po_number: '', status: 'sent', include_gst: true,
+    gst_rate: 0.15, time_subtotal: 12000, subtotal: 12240.5, gst_amount: 1800,
+    total: 14040.5, description: '', notes: '' },
+  business: { name: 'Auckland Transport', currency: 'NZD' },
+  myDetails: { business_name: 'Me Ltd', gst_number: '123-456-789' },
+  timeEntries: [], allocations: [],
+  expenses: [{ date: '2026-07-10', work_code: 'DEV', description: 'Flights', amount: 240.5 }],
+  codeGroups: [{ code: 'DEV', description: 'Development', totalHours: 80, totalAmount: 12000, rate: 150 }],
+  timeSubtotal: 12000, expenseSubtotal: 240.5, timeEntryCount: 1
+});
+
+check('services are shown on their own line', /Services<\/td><td class="number">\$12,000\.00/.test(printed));
+check('expenses are shown on their own line, and said to be at cost',
+  /Expenses \(recovered at cost\)<\/td><td class="number">\$240\.50/.test(printed));
+check('the combined figure is only ever a sum of the two above it',
+  /Subtotal<\/td><td class="number">\$12,240\.50/.test(printed));
+check('the three add up',
+  12000 + 240.5 === 12240.5 && /GST \(15% on services\)<\/td><td class="number">\$1,800\.00/.test(printed));
+check('and the total is the subtotal plus GST', /Total<\/td><td class="number">\$14,040\.50/.test(printed));
+check('services comes before the combined figure, so it is read first',
+  printed.indexOf('>Services<') < printed.indexOf('>Subtotal<'));
+
+// No expenses: no empty line, and services still named rather than implied.
+printed = '';
+cli.renderInvoiceDetail({
+  invoice: { invoice_id: 'AT0826', created_date: '2026-08-31', date_from: '2026-08-01',
+    date_to: '2026-08-31', po_number: '', status: 'sent', include_gst: false,
+    gst_rate: 0, time_subtotal: 900, subtotal: 900, gst_amount: 0, total: 900,
+    description: '', notes: '' },
+  business: { name: 'Auckland Transport', currency: 'NZD' },
+  myDetails: { business_name: 'Me Ltd' },
+  timeEntries: [], allocations: [], expenses: [],
+  codeGroups: [{ code: 'DEV', description: 'Development', totalHours: 6, totalAmount: 900, rate: 150 }],
+  timeSubtotal: 900, expenseSubtotal: 0, timeEntryCount: 1
+});
+check('no expenses line when there were none', printed.indexOf('recovered at cost') === -1);
+check('services is still named', /Services<\/td><td class="number">\$900\.00/.test(printed));
+
+// An invoice raised before time_subtotal existed: everything reads as services,
+// which is the closest honest answer, and the lines still add up.
+printed = '';
+cli.renderInvoiceDetail({
+  invoice: { invoice_id: '0325', created_date: '2026-03-31', date_from: '2026-03-01',
+    date_to: '2026-03-31', po_number: '', status: 'paid', include_gst: false,
+    gst_rate: 0, time_subtotal: '', subtotal: 1500, gst_amount: 0, total: 1500,
+    description: '', notes: '' },
+  business: { name: 'Auckland Transport', currency: 'NZD' },
+  myDetails: { business_name: 'Me Ltd' },
+  timeEntries: [], allocations: [], expenses: [],
+  codeGroups: [], timeSubtotal: 1500, expenseSubtotal: 0, timeEntryCount: 0
+});
+check('a pre-time_subtotal invoice still adds up',
+  /Services<\/td><td class="number">\$1,500\.00/.test(printed) &&
+  /Subtotal<\/td><td class="number">\$1,500\.00/.test(printed));
+check('no undefined or NaN on any printed invoice', !/undefined|NaN/.test(printed));
 
 console.log('\n' + passes + ' passed, ' + failures + ' failed');
 process.exit(failures > 0 ? 1 : 0);

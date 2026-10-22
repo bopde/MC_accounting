@@ -463,6 +463,37 @@ function refreshReferenceData() {
 /**
  * Get today's date as YYYY-MM-DD.
  */
+/**
+ * The one date range every reporting screen shares.
+ *
+ * AppState.dateFrom/dateTo was always shared — but each page RESET it to its
+ * own preset on render, so a range chosen on the Dashboard silently became
+ * three months on Invoices and six on Budget. Seven filters, five defaults,
+ * and no way to look at one period across the app.
+ *
+ * Set once per session and remembered. A screen that needs the exact range it
+ * was rendered with (Money Flow bounds a payment by it) still takes its own
+ * snapshot at render time — that is a different thing from the preference.
+ */
+var _reportRangeChosen = false;
+
+function reportRange() {
+  if (!_reportRangeChosen) {
+    var preset = datePreset('6months');
+    AppState.dateFrom = preset.from;
+    AppState.dateTo = preset.to;
+    _reportRangeChosen = true;
+  }
+  return { from: AppState.dateFrom, to: AppState.dateTo };
+}
+
+function setReportRange(from, to) {
+  if (from) AppState.dateFrom = from;
+  if (to) AppState.dateTo = to;
+  _reportRangeChosen = true;
+  return reportRange();
+}
+
 function todayStr() {
   var d = new Date();
   var mo = String(d.getMonth() + 1).padStart(2, '0');

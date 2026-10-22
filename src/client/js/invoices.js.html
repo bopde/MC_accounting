@@ -35,12 +35,9 @@ function renderInvoiceList() {
   var existingFrom = document.getElementById('inv-filter-from');
   var existingTo = document.getElementById('inv-filter-to');
   if (existingFrom && existingTo) {
-    AppState.dateFrom = existingFrom.value;
-    AppState.dateTo = existingTo.value;
+    setReportRange(existingFrom.value, existingTo.value);
   } else {
-    var range = datePreset('3months');
-    AppState.dateFrom = range.from;
-    AppState.dateTo = range.to;
+    reportRange();
   }
 
   content.innerHTML =
@@ -48,7 +45,7 @@ function renderInvoiceList() {
       buildDateFilters('inv-filter-from', 'inv-filter-to', AppState.dateFrom, AppState.dateTo) +
       '<button type="button" class="btn-subtle" onclick="renderInvoiceList()">Apply</button>' +
     '</div>' +
-    '<p class="muted small" style="margin:-0.5rem 0 0.5rem;">Default: last 3 months</p>' +
+    '<p class="muted small" style="margin:-0.5rem 0 0.5rem;">Shared with the Dashboard and Budget</p>' +
     '<div id="invoice-list-body" aria-busy="true">Loading invoices...</div>';
 
   serverCall('getInvoicesWithDetails', { dateFrom: AppState.dateFrom, dateTo: AppState.dateTo }).then(function(invoices) {
@@ -62,19 +59,22 @@ function renderInvoiceList() {
 
     var html = '<div class="scroll-x"><table class="data-table"><thead><tr>' +
       '<th>Invoice #</th><th>Business</th><th>Period</th><th>Created</th>' +
-      '<th class="number">Subtotal</th><th class="number">GST</th>' +
+      '<th class="number">Services</th><th class="number">Expenses</th>' +
+      '<th class="number">GST</th>' +
       '<th class="number">Total</th><th>Status</th><th>Actions</th>' +
       '</tr></thead><tbody>';
 
     invoices.forEach(function(inv) {
       var cur = inv.currency || 'NZD';
+      var split = invoiceSplit(inv);
       html += '<tr>' +
         '<td><strong>' + escapeHtml(inv.invoice_id) + '</strong></td>' +
         '<td>' + escapeHtml(inv.business_name) + '</td>' +
         '<td>' + formatDate(inv.date_from) + ' &rarr; ' + formatDate(inv.date_to) + '</td>' +
         '<td>' + formatDate(inv.created_date) + '</td>' +
-        '<td class="number">' + formatCurrency(inv.subtotal, cur) + '</td>' +
-        '<td class="number">' + (Number(inv.gst_amount) ? formatCurrency(inv.gst_amount, cur) : '&mdash;') + '</td>' +
+        '<td class="number">' + formatCurrency(split.services, cur) + '</td>' +
+        '<td class="number">' + (split.expenses ? formatCurrency(split.expenses, cur) : '<span class="muted">&mdash;</span>') + '</td>' +
+        '<td class="number">' + (Number(inv.gst_amount) ? formatCurrency(inv.gst_amount, cur) : '<span class="muted">&mdash;</span>') + '</td>' +
         '<td class="number"><strong>' + formatCurrency(inv.total, cur) + '</strong></td>' +
         '<td><span class="badge badge-' + escapeHtml(inv.status) + '">' + escapeHtml(inv.status) + '</span></td>' +
         '<td class="actions">' +
@@ -84,12 +84,41 @@ function renderInvoiceList() {
         '</tr>';
     });
 
-    html += '</tbody></table></div>';
+    html += '</tbody></table></div>' +
+      '<p class="muted small" style="margin:0.5rem 0 0;">' +
+        'Services is what you billed for your time &mdash; the figure that is income. ' +
+        'Expenses were recovered at cost and are not.' +
+      '</p>';
     body.innerHTML = html;
   }).catch(function(err) {
     var body = document.getElementById('invoice-list-body');
     if (body) body.innerHTML = '<p class="error">Error: ' + escapeHtml(err.message) + '</p>';
   });
+}
+
+/**
+ * Split an invoice into the services it billed and the expenses it passed on.
+ *
+ * These are different kinds of money and only one of them is income: expenses
+ * are reimbursements, recovered at cost. Adding them into a single "Subtotal"
+ * and reading that figure for tax overstates earnings by whatever was spent on
+ * the client's behalf — so nothing shows the combined figure without showing
+ * its two parts first.
+ *
+ * `time_subtotal` arrived with GST support, so invoices raised before that
+ * store only the combined subtotal. For those this reports everything as
+ * services, which is the closest honest answer the data allows.
+ */
+function invoiceSplit(inv) {
+  var subtotal = Number(inv.subtotal) || 0;
+  var services = (inv.time_subtotal != null && inv.time_subtotal !== '')
+    ? (Number(inv.time_subtotal) || 0)
+    : subtotal;
+  return {
+    services: services,
+    expenses: Math.round((subtotal - services) * 100) / 100,
+    subtotal: subtotal
+  };
 }
 
 function buildStatusButton(inv) {
@@ -236,17 +265,21 @@ function renderInvoiceDetail(data) {
     html += '</tbody></table>';
   }
 
-  var servicesSubtotal = data.timeSubtotal != null ? data.timeSubtotal
-    : (data.codeGroups || []).reduce(function(s, g) { return s + g.totalAmount; }, 0);
   var expensesSubtotal = data.expenseSubtotal != null ? data.expenseSubtotal
     : (data.expenses || []).reduce(function(s, e) { return s + (Number(e.amount) || 0); }, 0);
-  var hasTimeEntries = data.timeEntryCount > 0 || (data.codeGroups && data.codeGroups.length > 0);
-  var hasExpenses = data.expenses && data.expenses.length > 0;
+  // Derived from the stored subtotal rather than from the time entries, so the
+  // three lines always add up — including on invoices raised before
+  // time_subtotal existed, where the two sources can disagree.
+  var servicesSubtotal = Math.round(((Number(inv.subtotal) || 0) - expensesSubtotal) * 100) / 100;
 
+  // Services and expenses are always shown apart. The combined figure is only
+  // ever a sum of two lines printed above it, never a number on its own that
+  // could be mistaken for what was earned.
   html += '<div class="invoice-totals"><table>';
-  if (hasTimeEntries && hasExpenses) {
-    html += '<tr><td class="label">Services Subtotal</td><td class="number">' + formatCurrency(servicesSubtotal, currency) + '</td></tr>';
-    html += '<tr><td class="label">Expenses Subtotal</td><td class="number">' + formatCurrency(expensesSubtotal, currency) + '</td></tr>';
+  html += '<tr><td class="label">Services</td><td class="number">' + formatCurrency(servicesSubtotal, currency) + '</td></tr>';
+  if (Math.abs(expensesSubtotal) > 0.005) {
+    html += '<tr><td class="label">Expenses (recovered at cost)</td><td class="number">' +
+      formatCurrency(expensesSubtotal, currency) + '</td></tr>';
   }
   html += '<tr><td class="label">Subtotal</td><td class="number">' + formatCurrency(inv.subtotal, currency) + '</td></tr>';
   if (includeGst) {

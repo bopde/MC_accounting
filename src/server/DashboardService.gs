@@ -193,6 +193,31 @@ function getDashboardData(params) {
     budget: budget,
     accountBalances: accountBalances,
     contractProgress: contractProgress,
+    // What has been spent out of each pot, so the Reserve can be shown as the
+    // ledger it is rather than as the figure that was allocated to it.
+    potSpending: potSpending(params),
+    // Paid invoices with no allocation behind them, across ALL time. A to-do,
+    // not a period figure — the whole point is that it is easy to forget, so
+    // the date filter must not be able to hide it.
+    pendingAllocation: (function() {
+      var allocated = {};
+      allocations.forEach(function(a) { allocated[normalizeId(a.invoice_id)] = true; });
+
+      var waiting = invoicesRaw.filter(function(inv) {
+        return inv.status === 'paid' && !allocated[normalizeId(inv.invoice_id)];
+      });
+
+      var value = 0;
+      var oldest = '';
+      waiting.forEach(function(inv) {
+        var basis = invoiceAllocationBasis(inv);
+        value += basis.gross + basis.gstAmount;
+        var d = dateOnly(inv.created_date);
+        if (d && (!oldest || d < oldest)) oldest = d;
+      });
+
+      return { count: waiting.length, value: round2(value), oldest: oldest };
+    })(),
     // Untagged time that two or more overlapping contracts could each claim.
     // Counted against none of them, and reported so the gap is visible rather
     // than looking like work that was never logged.

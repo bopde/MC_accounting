@@ -22,7 +22,7 @@ const vm = require('vm');
 
 const ROOT = path.resolve(__dirname, '..');
 
-const source = ['BudgetCategories.gs', 'BudgetService.gs']
+const source = ['BudgetCategories.gs', 'BudgetService.gs', 'BusinessExpenseService.gs']
   .map(function(f) { return fs.readFileSync(path.join(ROOT, 'src', 'server', f), 'utf8'); })
   .join('\n');
 
@@ -52,7 +52,13 @@ const db = {
       include_gst: true, gst_rate: 0.15, time_subtotal: 158.73, subtotal: 158.73,
       gst_amount: 23.81, total: 182.54, status: 'paid', budget_rule_id: 'BR-000', _rowIndex: 3 }
   ],
-  BudgetRules: [Object.assign({}, COMPANY_RULE, { _rowIndex: 2 })],
+  // A pre-company rule too, so the frozen cascade can be tried and refused.
+  BudgetRules: [
+    Object.assign({}, COMPANY_RULE, { _rowIndex: 2 }),
+    { rule_id: 'BR-000', name: 'Old Split', model: 'sole_trader', is_default: false, active: true,
+      tax_withheld_pct: 0.10, tax_to_pay_pct: 0.28, acc_withheld_pct: 0, acc_to_pay_pct: 0.02,
+      donate_pct: 0.05, save_pct: 0.10, invest_pct: 0.15, spend_pct: 0.70, _rowIndex: 3 }
+  ],
   // Pre-company allocations: free-text labels, no category_key or scope.
   // The withheld row is what the payer deducted and paid to the IRD — already
   // settled, and the case that proves withholding is counted inside its
@@ -197,6 +203,30 @@ try {
 }
 assert(blocked, 'a second allocation of the same invoice is refused');
 
+// --- The sole-trader cascade is frozen ---
+
+console.log('\nThe pre-company cascade reads but no longer writes');
+
+assert((function() {
+  let refused = '';
+  try { app.allocateBudget('0425', 'BR-000'); } catch (e) { refused = e.message; }
+  return /pre-company \(sole trader\) rule/.test(refused);
+})(), 'a new allocation on an old rule is refused, and says why');
+
+assert((function() {
+  let refused = '';
+  try { app.previewAllocation('0425', 'BR-000'); } catch (e) { refused = e.message; }
+  return /pre-company \(sole trader\) rule/.test(refused);
+})(), 'and refused at the preview, before anything has been read');
+
+assert((function() {
+  const legacyRule = { rule_id: 'BR-000', name: 'Old Split', model: '',
+    tax_withheld_pct: 0.1, tax_to_pay_pct: 0.28, acc_withheld_pct: 0, acc_to_pay_pct: 0.02,
+    donate_pct: 0.05, save_pct: 0.10, invest_pct: 0.15, spend_pct: 0.70 };
+  const plan = app.computeLegacyAllocation(legacyRule, 1000, 0);
+  return r2(plan.lines.reduce(function(s, l) { return s + l.amount; }, 0)) === 1000;
+})(), 'the maths itself still works — it is the write path that closed, not the cascade');
+
 // --- Summary ---
 
 console.log('\nSummary');
@@ -339,6 +369,29 @@ assert(r2(after.totals.paid) === r2(750 + 15.87),
   'paid total counts withheld money too, got ' + after.totals.paid);
 
 app.updateAllocationStatus(gstRow.allocation_id, 'allocated');
+
+// It is an escape hatch for a cascade line, not a way to poke at the rows a
+// payment creates — settling a credit "in full" would set its paid amount to
+// its zero owed and erase it.
+const creditPayment = app.payBudgetCategories('biz_acc',
+  bucket(app.getBudgetSummary(RANGE), 'biz_acc').outstanding + 25, '2026-06-30', '', RANGE, 'overpay');
+const creditRow = app.getAll('BudgetAllocations').find(function(a) {
+  return a.entry_type === 'credit';
+});
+assert(!!creditRow, 'the overpayment left a credit row to try it on');
+assert((function() {
+  let refused = '';
+  try { app.updateAllocationStatus(creditRow.allocation_id, 'paid'); } catch (e) { refused = e.message; }
+  return /created by a payment/.test(refused);
+})(), 'settling a credit row by hand is refused, and says to undo the payment instead');
+assert(r2(app.allocationPaidAmount(app.getAll('BudgetAllocations').find(function(a) {
+  return a.allocation_id === creditRow.allocation_id;
+}))) === 25, 'and the credit is untouched');
+
+// Put the book back: the sections below share this fixture.
+app.undoBudgetPayment(creditPayment.payment_id);
+assert(!app.getAll('BudgetAllocations').some(function(a) { return a.entry_type === 'credit'; }),
+  'the credit row is gone again');
 const undone = app.getBudgetSummary(RANGE);
 assert(r2(undone.accountHoldings.business) === businessExpected, 'undo restores business holdings');
 
@@ -490,6 +543,97 @@ assert(app.allocationPaidAmount({ amount: 100, status: 'allocated', paid_amount:
 assert(app.parseCoveredAllocations('BA-002:252;BA-003:18').length === 2,
   'a coverage string round-trips');
 assert(app.parseCoveredAllocations('').length === 0, 'an empty coverage string is no allocations');
+
+// --- Paying more than is outstanding ---
+
+console.log('\nOverpaying and correcting');
+
+/** Bill and allocate another invoice, the way the next month would. */
+let nextInvoiceSeq = 0;
+function allocateAnother(timeSubtotal) {
+  const id = '07' + String(++nextInvoiceSeq).padStart(2, '0');
+  db.Invoices.push({
+    invoice_id: id, business_id: 'BIZ-001', created_date: '2026-07-31',
+    include_gst: true, gst_rate: 0.15, time_subtotal: timeSubtotal,
+    subtotal: timeSubtotal, gst_amount: r2(timeSubtotal * 0.15),
+    total: r2(timeSubtotal * 1.15), status: 'paid', budget_rule_id: '',
+    _rowIndex: db.Invoices.length + 2
+  });
+  app.allocateBudget(id, 'BR-001');
+  return id;
+}
+
+/** Back to just the cascade's own rows, with nothing paid. */
+function resetBook() {
+  db.BudgetPayments = [];
+  db.BudgetAllocations = db.BudgetAllocations.filter(function(a) {
+    return a.entry_type !== 'credit' && a.entry_type !== 'adjustment';
+  }).map(function(a) {
+    const withheld = String(a.notes || '').indexOf('withheld') !== -1;
+    a.status = withheld ? 'paid' : 'allocated';
+    a.paid_amount = withheld ? a.amount : 0;
+    a.transfer_date = withheld ? a.transfer_date : '';
+    return a;
+  });
+}
+
+resetBook();
+
+assert((function() {
+  let refused = '';
+  try { app.payBudgetCategories('biz_acc', 500, '2026-06-21', '', RANGE); }
+  catch (e) { refused = e.message; }
+  return /overpayment|correction/.test(refused);
+})(), 'the default still refuses a surplus, and names the two ways to resolve it');
+
+// Business ACC is allocated at 50. Pay 80 as an overpayment.
+app.payBudgetCategories('biz_acc', 80, '2026-06-21', '', RANGE, 'overpay');
+const overpaid = bucket(app.getBudgetSummary(RANGE), 'biz_acc');
+assert(r2(overpaid.allocated) === 50, 'an overpayment does not change what was owed, got ' + overpaid.allocated);
+assert(r2(overpaid.paid) === 80, 'all of it counts as paid, got ' + overpaid.paid);
+assert(r2(overpaid.outstanding) === -30, 'and the balance goes into credit, got ' + overpaid.outstanding);
+assert(overpaid.items.some(function(i) { return i.status === 'credit'; }),
+  'the credit is a row of its own, visible per invoice');
+
+// The next invoice's allocation is covered by the credit before any cash is.
+const beforeNext = bucket(app.getBudgetSummary(RANGE), 'biz_acc');
+allocateAnother(5000);
+const afterNext = bucket(app.getBudgetSummary(RANGE), 'biz_acc');
+const added = r2(afterNext.allocated - beforeNext.allocated);
+assert(added > 30, 'the new invoice allocated more than the credit, got ' + added);
+assert(r2(afterNext.outstanding) === r2(added - 30),
+  'the 30 credit works the new ' + added + ' down to ' + r2(added - 30) +
+  ', got ' + afterNext.outstanding);
+assert(r2(afterNext.paid) === 80, 'and no more money moved, got ' + afterNext.paid);
+
+// Corrections instead: you owed more than the cascade set aside.
+resetBook();
+const beforeCorrection = bucket(app.getBudgetSummary(RANGE), 'biz_gst');
+app.payBudgetCategories('biz_gst,legacy_gst', r2(beforeCorrection.outstanding + 125), '2026-06-22',
+  'IRD assessed more', RANGE, 'correct');
+const corrected = bucket(app.getBudgetSummary(RANGE), 'biz_gst');
+assert(r2(corrected.allocated) === r2(beforeCorrection.allocated + 125),
+  'a correction raises what was owed, got ' + corrected.allocated);
+assert(r2(corrected.paid) === r2(corrected.allocated), 'and settles it in the same breath');
+assert(r2(corrected.outstanding) === 0, 'leaving nothing outstanding, got ' + corrected.outstanding);
+assert(corrected.items.some(function(i) { return i.status === 'correction'; }),
+  'the correction is a row of its own');
+
+// Undo must remove the row it created, not leave an empty one behind.
+const correctionPayment = app.getBudgetSummary(RANGE).payments[0];
+app.undoBudgetPayment(correctionPayment.payment_id);
+const correctionUndone = bucket(app.getBudgetSummary(RANGE), 'biz_gst');
+assert(r2(correctionUndone.allocated) === r2(beforeCorrection.allocated),
+  'undoing a correction takes the extra owed back off, got ' + correctionUndone.allocated);
+assert(!correctionUndone.items.some(function(i) { return i.status === 'correction'; }),
+  'and removes the row rather than zeroing it');
+
+assert((function() {
+  let refused = '';
+  try { app.payBudgetCategories('biz_acc', 10, '2026-06-21', '', RANGE, 'sideways'); }
+  catch (e) { refused = e.message; }
+  return /Unknown way to handle a surplus/.test(refused);
+})(), 'an unrecognised way to handle a surplus is refused');
 
 console.log('\n' + passes + ' passed, ' + failures + ' failed');
 process.exit(failures > 0 ? 1 : 0);

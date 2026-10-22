@@ -37,34 +37,22 @@ function previewAllocationFromClient(params) {
 }
 
 /**
- * Update allocation status from client.
- * @param {string} params - "allocationId|newStatus|transferDate|notes"
- */
-function updateAllocationStatusFromClient(params) {
-  var parts = String(params).split('|');
-  if (parts.length < 2) throw new Error('Invalid parameters');
-  // The note is free text and may itself contain '|' (e.g. "ASB 4471 | GST Q2"),
-  // so it takes everything after the third delimiter rather than one field.
-  var notes = parts.length > 3 ? parts.slice(3).join('|') : '';
-  return updateAllocationStatus(parts[0], parts[1], parts[2] || null, notes || null);
-}
-
-/**
  * Record a payment against one or more budget categories.
  *
- * @param {string} params - "categoryKeys|amount|paymentDate|dateFrom|dateTo|notes"
+ * @param {string} params
+ *   "categoryKeys|amount|paymentDate|dateFrom|dateTo|surplusMode|notes"
  *
- * The note comes last and takes everything after the fifth delimiter, because
+ * The note comes last and takes everything after the sixth delimiter, because
  * free text may itself contain '|' (e.g. "ASB 4471 | GST Q2").
  */
 function payBudgetCategoriesFromClient(params) {
   var parts = String(params).split('|');
   if (parts.length < 3) throw new Error('Invalid parameters');
-  var notes = parts.length > 5 ? parts.slice(5).join('|') : '';
+  var notes = parts.length > 6 ? parts.slice(6).join('|') : '';
   return payBudgetCategories(parts[0], parts[1], parts[2] || null, notes || null, {
     dateFrom: parts[3] || '',
     dateTo: parts[4] || ''
-  });
+  }, parts[5] || null);
 }
 
 /**

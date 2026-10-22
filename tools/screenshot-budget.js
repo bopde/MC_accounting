@@ -68,7 +68,7 @@ function loadPlaywright() {
 
 const srv = { Logger: { log: function() {} } };
 vm.createContext(srv);
-vm.runInContext(['BudgetCategories.gs', 'BudgetService.gs']
+vm.runInContext(['BudgetCategories.gs', 'BudgetService.gs', 'BusinessExpenseService.gs']
   .map(function(f) { return fs.readFileSync(path.join(ROOT, 'src', 'server', f), 'utf8'); })
   .join('\n'), srv, { filename: 'budget-service.js' });
 
@@ -118,11 +118,13 @@ const db = {
       transfer_date: r[4] === 'paid' ? '2026-03-31' : '', notes: '', _rowIndex: i + 2
     };
   }),
-  BudgetPayments: []
+  BudgetPayments: [],
+  BusinessExpenses: []
 };
 
 let seq = 100;
 let paymentSeq = 0;
+let expenseSeq = 0;
 Object.assign(srv, {
   LockService: { getScriptLock: function() { return { waitLock: function() {}, releaseLock: function() {} }; } },
   withScriptLock: function(fn) { return fn(); },
@@ -135,6 +137,7 @@ Object.assign(srv, {
   appendRow: function(n, d) {
     if (n === 'BudgetAllocations') d.allocation_id = 'BA-' + (++seq);
     if (n === 'BudgetPayments') d.payment_id = 'BP-' + String(++paymentSeq).padStart(3, '0');
+    if (n === 'BusinessExpenses') d.expense_id = 'BE-' + String(++expenseSeq).padStart(3, '0');
     d._rowIndex = db[n].length + 2;
     db[n].push(Object.assign({}, d));
     return d;
@@ -154,6 +157,12 @@ Object.assign(srv, {
   },
   normalizeId: function(i) { return String(i).replace(/^0+/, '') || '0'; },
   isTruthy: function(v) { return v === true || v === 'TRUE' || v === 'true'; },
+  requireDate: function(v) {
+    const d = srv.dateOnly(v);
+    if (!d) throw new Error('Not a valid date: ' + v);
+    return d;
+  },
+  stripGeneratedId: function(data, field) { delete data[field]; return data; },
   todayLocal: function() { return '2026-07-06'; },
   dateOnly: function(v) { return (String(v).match(/^(\d{4}-\d{2}-\d{2})/) || ['', ''])[1]; },
   getByDateRange: function(n, c, f, t) {
@@ -190,6 +199,20 @@ srv.payBudgetCategories('per_tax,legacy_tax', 2500, '2026-07-02', '', RANGE);
 srv.payBudgetCategories('owner_pay', 9000, '2026-07-03', 'Drawn to personal', RANGE);
 srv.payBudgetCategories('per_save,legacy_save', 800, '2026-07-04', 'Emergency fund', RANGE);
 srv.payBudgetCategories('biz_reserve', 1500, '2026-07-05', '', RANGE);
+// Paid more ACC than was owed, kept as credit — so a credit tile is in shot.
+srv.payBudgetCategories('biz_acc', 420, '2026-07-05', 'Rounded up the ACC invoice', RANGE, 'overpay');
+
+// Operating costs, spent out of the Reserve — software, hardware, fees. Not
+// the client-rebillable Expenses sheet: these are billed to nobody.
+[
+  ['2026-06-02', 'Xero subscription', 'Software', 70],
+  ['2026-06-18', 'Standing desk', 'Office', 349],
+  ['2026-07-01', 'Annual accounts', 'Accounting & legal', 450],
+  ['2026-07-02', 'Professional indemnity', 'Insurance', 310]
+].forEach(function(e) {
+  srv.addBusinessExpense({ date: e[0], description: e[1], category: e[2], amount: e[3],
+    paid_from: 'biz_reserve' });
+});
 
 const summary = srv.getBudgetSummary(RANGE);
 
@@ -206,7 +229,14 @@ const cli = {
   console: console,
   document: {
     getElementById: function(id) {
-      if (!hosts[id]) hosts[id] = { id: id, innerHTML: '', focus: function() {} };
+      if (!hosts[id]) {
+        hosts[id] = {
+          id: id, innerHTML: '', value: '', hidden: false, checked: false,
+          focus: function() {},
+          setAttribute: function(k, v) { if (k === 'hidden') this.hidden = true; else this[k] = v; },
+          removeAttribute: function(k) { if (k === 'hidden') this.hidden = false; }
+        };
+      }
       return hosts[id];
     }
   },
@@ -234,18 +264,47 @@ const overview =
   cli.renderMoneyMap(summary, cats) +
   cli.renderRevenueSection(summary, cats) +
   cli.renderObligationsSection(cats) +
-  cli.renderIncomeSection(cats) +
+  cli.renderIncomeSection(cats, summary) +
   cli.renderAllocationsSection(cats);
 const history = cli.renderHistorySection(summary, cats);
 
 // The payment panel, produced by the real openPayPanel and spliced into the
 // host it targets — there is no server here to click a button against.
-const gst = cli.sumCats(cats, ['biz_tax']);
-cli.openPayPanel('pay-host-obligations', 'biz_tax', 'Tax to pay', 'pay', gst.outstanding);
+const tax = cli.sumCats(cats, ['biz_tax']);
+cli.openPayPanel('pay-host-obligations', 'biz_tax', 'Tax to pay', 'pay', tax.outstanding);
 const panel = hosts['pay-host-obligations'].innerHTML;
 const withPanel = overview.replace(
   '<div class="pay-host" id="pay-host-obligations"></div>',
   '<div class="pay-host" id="pay-host-obligations">' + panel + '</div>');
+
+// And the same panel with more typed in than is outstanding, which is what
+// raises the overpay-or-correct question. The question's wording comes from
+// the real onPayAmountChanged; it is spliced in because innerHTML in this stub
+// is a plain string, so mutating a child element does not reach its parent.
+hosts['pay-amount'].value = String(Math.round((tax.outstanding + 250) * 100) / 100);
+cli.onPayAmountChanged();
+const surplusPanel = panel
+  .replace('id="pay-surplus" hidden', 'id="pay-surplus"')
+  .replace('id="pay-surplus-lead"></p>',
+    'id="pay-surplus-lead">' + hosts['pay-surplus-lead'].innerHTML + '</p>')
+  .replace('id="pay-amount" step="0.01" min="0.01" value="' + tax.outstanding.toFixed(2) + '"',
+    'id="pay-amount" step="0.01" min="0.01" value="' + hosts['pay-amount'].value + '"');
+const withSurplus = overview.replace(
+  '<div class="pay-host" id="pay-host-obligations"></div>',
+  '<div class="pay-host" id="pay-host-obligations">' + surplusPanel + '</div>');
+
+// The Business Expenses tab, from the real server view and the real renderers.
+const expenseView = srv.getBusinessExpenseView(RANGE);
+const expensesTab =
+  '<div class="filters">' +
+    '<label>From <input type="date" value="' + RANGE.dateFrom + '"></label>' +
+    '<label>To <input type="date" value="' + RANGE.dateTo + '"></label>' +
+    '<button type="button" class="btn-subtle">Apply</button>' +
+  '</div>' +
+  '<p class="muted small" style="margin:-0.5rem 0 0.5rem;">Default: this year</p>' +
+  cli.renderPotBalances(expenseView.pots) +
+  cli.renderBusinessExpenseForm(expenseView) +
+  cli.renderBusinessExpenseList(expenseView.expenses);
 
 // --- Page shell, mirroring index.html ---
 
@@ -299,8 +358,10 @@ function page(body, opts) {
     '<main class="container">' +
       '<div id="app-content">' +
         '<div class="tab-bar" id="budget-tabs">' +
-          '<button type="button" class="active">Money Flow</button>' +
-          '<button type="button">Allocate Invoice</button>' +
+          ['Money Flow', 'Allocate Invoice', 'Business Expenses'].map(function(t) {
+            return '<button type="button"' +
+              (t === (opts.tab || 'Money Flow') ? ' class="active"' : '') + '>' + t + '</button>';
+          }).join('') +
         '</div>' +
         '<div id="budget-tab-content">' + (opts.filters === false ? '' : filters) + body + '</div>' +
       '</div>' +
@@ -317,8 +378,14 @@ const SHOTS = [
   { file: 'money-flow-payment-panel.png', width: 1280,
     html: page(withPanel + history),
     caption: 'Recording a payment: full remaining or any part of it.' },
+  { file: 'money-flow-overpayment.png', width: 1280,
+    html: page(withSurplus + history),
+    caption: 'Paying more than is owed: overpayment, or a correction?' },
   // The history alone, at 1x: expanded it runs to several thousand pixels, and
   // at 2x over the whole page the file is too large to be worth reviewing.
+  { file: 'business-expenses.png', width: 1280,
+    html: page(expensesTab, { filters: false, tab: 'Business Expenses' }),
+    caption: 'Business Expenses: the pot balance, the form, and what has been spent.' },
   { file: 'money-flow-history.png', width: 1280, scale: 1,
     html: page(history.replace('<details class="flow-group history-group">',
       '<details class="flow-group history-group" open>'), { filters: false }),

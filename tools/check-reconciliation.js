@@ -131,9 +131,10 @@ const app = {
   SpreadsheetApp: { getActiveSpreadsheet: function() { return app.__ss; } }
 };
 vm.createContext(app);
-vm.runInContext(['BudgetCategories.gs', 'BudgetService.gs', 'SheetService.gs', 'Setup.gs',
-  'IdService.gs', 'InvoiceService.gs', 'SettingsService.gs', 'ContractService.gs',
-  'HoursService.gs', 'DashboardService.gs', 'AccountService.gs', 'ClientWrappers.gs']
+vm.runInContext(['BudgetCategories.gs', 'BudgetService.gs', 'BusinessExpenseService.gs',
+  'SheetService.gs', 'Setup.gs', 'IdService.gs', 'InvoiceService.gs', 'SettingsService.gs',
+  'ContractService.gs', 'HoursService.gs', 'DashboardService.gs', 'AccountService.gs',
+  'ClientWrappers.gs']
   .map(function(f) { return fs.readFileSync(path.join(ROOT, 'src', 'server', f), 'utf8'); })
   .join('\n'), app, { filename: 'reconciliation.js' });
 
@@ -344,7 +345,35 @@ function buildBook() {
       };
     })
   });
-  BOOK.forEach(function(b) { app.allocateBudget(b.id, b.rule); });
+  BOOK.forEach(function(b) {
+    if (b.rule === 'BR-001') { app.allocateBudget(b.id, b.rule); return; }
+
+    allocateHistorically(b.id, b.time, b.gst ? r2(b.time * 0.15) : 0, b.date);
+  });
+}
+
+/**
+ * Write a pre-company allocation as the stored rows it actually is.
+ *
+ * The sole-trader cascade is frozen — it reads, it does not write — so these
+ * go in through the same maths the old version used rather than through
+ * allocateBudget. Asking today's app to create data it can no longer create
+ * would not be testing a historical invoice; it would be testing a path that
+ * is deliberately closed.
+ */
+function allocateHistorically(invoiceId, time, gst, date) {
+  app.computeLegacyAllocation(LEGACY_RULE, time, gst).lines.forEach(function(line) {
+    if (line.amount === 0) return;
+    const autoPaid = line.settle === 'auto_paid';
+    app.appendRow('BudgetAllocations', {
+      invoice_id: invoiceId, category: line.label, category_key: line.key, scope: line.scope,
+      percentage: line.pct == null ? '' : line.pct, amount: line.amount,
+      status: autoPaid ? 'paid' : 'allocated',
+      paid_amount: autoPaid ? line.amount : 0,
+      entry_type: '', transfer_date: autoPaid ? date : '',
+      notes: autoPaid ? 'Auto-paid (withheld by payer)' : ''
+    });
+  });
 }
 
 /** What the invoices themselves say was billed for time, plus GST. */
@@ -360,6 +389,10 @@ check('every invoice allocates exactly its billed hours plus GST', function() {
   app.getAll('BudgetAllocations').forEach(function(a) {
     const def = app.getCategoryDef(app.resolveCategoryKey(a));
     if (def && def.isTransfer) return;
+    // Corrections and credits are filed against an invoice so a date filter
+    // cannot lose them, but they are facts about a BUCKET. An invoice's own
+    // lines go on summing to what it billed however much is later paid.
+    if (!app.isCascadeLine(a)) return;
     const k = String(a.invoice_id);
     byInvoice[k] = r2((byInvoice[k] || 0) + (Number(a.amount) || 0));
   });
@@ -375,6 +408,7 @@ check('expenses are billed to the client but never allocated', function() {
   const allocated = r2(app.getAll('BudgetAllocations').reduce(function(s, a) {
     const def = app.getCategoryDef(app.resolveCategoryKey(a));
     if (def && def.isTransfer) return s;
+    if (!app.isCascadeLine(a)) return s;
     return s + (Number(a.amount) || 0);
   }, 0));
   const invoiced = r2(app.getAll('Invoices').reduce(function(s, i) { return s + Number(i.total); }, 0));
@@ -573,6 +607,103 @@ check('paying every bucket to the cent leaves nothing outstanding and nothing ov
   const after = app.getBudgetSummary(RANGE).totals;
   exact(after.outstanding, 0, 'outstanding after paying everything');
   exact(after.paid, after.allocated, 'paid equals allocated');
+});
+
+// =====================================================================
+// 3b. Paying more than is owed
+// =====================================================================
+
+section('A surplus goes exactly where the person said it should');
+
+/** One bucket out of the current summary. */
+function bucket(sum, key) {
+  let found = null;
+  (sum.scopes || []).forEach(function(g) {
+    (g.categories || []).forEach(function(c) { if (c.key === key) found = c; });
+  });
+  return found || { allocated: 0, paid: 0, outstanding: 0, items: [] };
+}
+
+check('an overpayment leaves what was owed alone and holds the rest as credit', function() {
+  buildBook();
+  const before = app.getBudgetSummary(RANGE).totals;
+  const owed = bucket(app.getBudgetSummary(RANGE), 'biz_acc').outstanding;
+
+  app.payBudgetCategories('biz_acc', r2(owed + 40), '2026-08-01', '', RANGE, 'overpay');
+  const after = app.getBudgetSummary(RANGE).totals;
+
+  exact(after.allocated, before.allocated, 'nothing new is owed');
+  exact(after.paid - before.paid, owed + 40, 'all of it counts as paid');
+  exact(after.outstanding, before.outstanding - owed - 40, 'and the balance carries the credit');
+  exact(after.allocated, after.paid + after.outstanding, 'allocated = paid + outstanding still holds');
+});
+
+check('a correction raises what was owed by exactly the surplus', function() {
+  buildBook();
+  const before = app.getBudgetSummary(RANGE).totals;
+  const owed = bucket(app.getBudgetSummary(RANGE), 'biz_acc').outstanding;
+
+  app.payBudgetCategories('biz_acc', r2(owed + 40), '2026-08-01', '', RANGE, 'correct');
+  const after = app.getBudgetSummary(RANGE).totals;
+
+  exact(after.allocated - before.allocated, 40, 'what is owed rises by the surplus');
+  exact(after.paid - before.paid, owed + 40, 'and all of it is paid');
+  exact(after.outstanding, before.outstanding - owed, 'leaving nothing extra outstanding');
+  exact(after.allocated, after.paid + after.outstanding, 'allocated = paid + outstanding still holds');
+});
+
+check('either way, every paid dollar is still a payment or was withheld', function() {
+  buildBook();
+  const withheldBefore = paidTotals().withheld;
+  const owed = bucket(app.getBudgetSummary(RANGE), 'biz_acc').outstanding;
+
+  app.payBudgetCategories('biz_acc', r2(owed + 40), '2026-08-01', '', RANGE, 'overpay');
+  app.payBudgetCategories('biz_tax', 25, '2026-08-02', '', RANGE, 'refuse');
+  exact(paidTotals().paid, withheldBefore + paymentsTotal(), 'after an overpayment');
+
+  buildBook();
+  const owed2 = bucket(app.getBudgetSummary(RANGE), 'biz_acc').outstanding;
+  app.payBudgetCategories('biz_acc', r2(owed2 + 40), '2026-08-01', '', RANGE, 'correct');
+  exact(paidTotals().paid, paidTotals().withheld + paymentsTotal(), 'after a correction');
+});
+
+check('an invoice still accounts for exactly what it billed, after both', function() {
+  buildBook();
+  const owed = bucket(app.getBudgetSummary(RANGE), 'biz_acc').outstanding;
+  app.payBudgetCategories('biz_acc', r2(owed + 40), '2026-08-01', '', RANGE, 'overpay');
+  app.payBudgetCategories('biz_tax', r2(bucket(app.getBudgetSummary(RANGE), 'biz_tax').outstanding + 15),
+    '2026-08-02', '', RANGE, 'correct');
+
+  const byInvoice = {};
+  app.getAll('BudgetAllocations').forEach(function(a) {
+    const def = app.getCategoryDef(app.resolveCategoryKey(a));
+    if ((def && def.isTransfer) || !app.isCascadeLine(a)) return;
+    const k = String(a.invoice_id);
+    byInvoice[k] = r2((byInvoice[k] || 0) + (Number(a.amount) || 0));
+  });
+  BOOK.forEach(function(b) {
+    exact(byInvoice[b.id], r2(b.time + (b.gst ? r2(b.time * 0.15) : 0)), b.id);
+  });
+});
+
+check('undoing either one puts the book back exactly', function() {
+  buildBook();
+  const before = app.getBudgetSummary(RANGE).totals;
+  const owed = bucket(app.getBudgetSummary(RANGE), 'biz_acc').outstanding;
+
+  ['overpay', 'correct'].forEach(function(mode) {
+    const result = app.payBudgetCategories('biz_acc', r2(owed + 40), '2026-08-01', '', RANGE, mode);
+    app.undoBudgetPayment(result.payment_id);
+    const after = app.getBudgetSummary(RANGE).totals;
+    exact(after.allocated, before.allocated, mode + ': allocated');
+    exact(after.paid, before.paid, mode + ': paid');
+    exact(after.outstanding, before.outstanding, mode + ': outstanding');
+  });
+
+  const leftovers = app.getAll('BudgetAllocations').filter(function(a) {
+    return !app.isCascadeLine(a);
+  });
+  eq(leftovers.length, 0, 'no credit or correction rows are left behind');
 });
 
 // =====================================================================
@@ -791,7 +922,7 @@ check('even when the sole-trader share is bigger than the balance owed', functio
         subtotal: 1000, gst_amount: 0, total: 1000, status: 'paid', budget_rule_id: '' }
     ]
   });
-  app.allocateBudget('AT0126', 'BR-000');
+  allocateHistorically('AT0126', 15000, 0, '2026-01-31');
   app.allocateBudget('AT0226', 'BR-001');
 
   const cats = cli.catByKey(app.getBudgetSummary(RANGE));

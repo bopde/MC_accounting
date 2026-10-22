@@ -139,6 +139,13 @@ const INVOICE = { invoice_id: 'BC0526', business_id: 'BIZ-001', business_name: "
   total: 5750, status: 'paid', budget_rule_id: '', contract_id: '', po_number: '',
   description: '', notes: '', line_descriptions: '', _rowIndex: 2 };
 
+// Paid and NOT in the allocation fixture, so the Allocate tab has something to
+// offer and its rule picker renders.
+const UNALLOCATED_INVOICE = Object.assign({}, INVOICE, {
+  invoice_id: 'BC0626', date_from: '2026-06-01', date_to: '2026-06-30',
+  created_date: '2026-06-30', _rowIndex: 3
+});
+
 const TIME_ENTRY = { entry_id: 'TE-001', business_id: 'BIZ-001', date: '2026-05-15',
   time_start: '09:00', time_end: '17:00', hours: 8, description: 'Work',
   work_code: 'DEV', rate: 150, line_total: 1200, invoice_id: '', contract_id: '', _rowIndex: 2 };
@@ -220,7 +227,7 @@ const RESPONSES = {
   },
   getTimeEntries: [TIME_ENTRY],
   getExpenses: [EXPENSE],
-  getInvoicesWithDetails: [INVOICE],
+getInvoicesWithDetails: [INVOICE, UNALLOCATED_INVOICE],
   getInvoiceDetails: {
     invoice: INVOICE, business: BUSINESS, myDetails: RESPONSES_MY_DETAILS(),
     timeEntries: [TIME_ENTRY], expenses: [EXPENSE], allocations: [ALLOCATION],
@@ -228,6 +235,17 @@ const RESPONSES = {
   },
   getUninvoicedItems: { timeEntries: [TIME_ENTRY], expenses: [EXPENSE] },
   getBudgetSummary: budgetSummaryFixture(),
+  getBusinessExpenseView: {
+    pots: [{ key: 'biz_reserve', label: 'Reserve', allocated: 500, paidIn: 400,
+      stillToMoveIn: 100, spent: 120, balance: 280 }],
+    categories: ['Software', 'Hardware', 'Accounting & legal'],
+    expenses: [{ expense_id: 'BE-001', date: '2026-05-04', description: 'Xero subscription',
+      category: 'Software', amount: 120, paid_from: 'biz_reserve',
+      paid_from_label: 'Reserve', notes: 'Annual' }]
+  },
+  addBusinessExpense: { expense_id: 'BE-002' },
+  updateBusinessExpense: { expense_id: 'BE-001' },
+  deleteBusinessExpense: { success: true },
   payBudgetCategoriesFromClient: { payment_id: 'BP-002', amount: 400,
     category: 'Business Tax', allocations: 1 },
   undoBudgetPaymentFromClient: { success: true, amount: 750, category: 'GST' },
@@ -305,7 +323,9 @@ vm.runInContext(files.map(function(f) {
 
 // Replace the stubs the modules need, AFTER loading (they declare `var`).
 const unknownCalls = [];
+const calls = [];
 cli.serverCall = function(name, args) {
+  calls.push({ name: name, args: args });
   if (!Object.prototype.hasOwnProperty.call(RESPONSES, name)) {
     unknownCalls.push(name);
     return Promise.resolve(null);
@@ -379,7 +399,13 @@ async function drive(label, fn) {
   await drive('invoices > create', function() { cli.showInvoiceTab('create'); });
   await drive('invoices > list', function() { cli.showInvoiceTab('list'); });
   await drive('budget > allocate', function() { cli.showBudgetTab('allocate'); });
+  check('the allocate picker offers only company rules',
+    (function() {
+      const html = doc.getElementById('budget-tab-content').innerHTML;
+      return html.indexOf('Company Default') !== -1 && html.indexOf('Old Split') === -1;
+    })(), doc.getElementById('budget-tab-content').innerHTML.slice(0, 300));
   await drive('budget > money flow', function() { cli.showBudgetTab('summary'); });
+  await drive('budget > business expenses', function() { cli.showBudgetTab('expenses'); });
   for (const tab of ['mydetails', 'businesses', 'contracts', 'codes', 'accounts', 'rules']) {
     await drive('settings > ' + tab, function() { cli.showSettingsTab(tab); });
   }
@@ -441,17 +467,166 @@ async function drive(label, fn) {
   await drive('undo a payment', function() { cli.undoPayment('BP-001'); });
   await drive('remove an allocation', function() { cli.removeAllocation('BC0526'); });
 
-  // Both must refuse before reaching the server, so the error is immediate.
+  // Zero is still refused before reaching the server, so the error is immediate.
   const beforeRefusals = toasts.length;
   cli.openPayPanel('pay-host-obligations', 'biz_tax', 'Tax to pay', 'pay', 1400);
   doc.getElementById('pay-amount').value = '0';
   cli.submitPayment();
-  doc.getElementById('pay-amount').value = '99999';
-  cli.submitPayment();
   const refusals = toasts.slice(beforeRefusals).filter(function(t) { return t.type === 'error'; });
-  check('a zero and an over-payment are both refused client-side',
-    refusals.length === 2, 'got ' + refusals.length + ' refusals');
+  check('a zero payment is refused client-side', refusals.length === 1,
+    'got ' + refusals.length + ' refusals');
+
+  // Paying more than is outstanding is no longer refused — it asks which it is.
+  console.log('\nOverpaying');
+  const surplusHost = function() { return doc.getElementById('pay-host-obligations').innerHTML; };
+  check('the question is hidden while the amount fits',
+    /id="pay-surplus" hidden/.test(surplusHost()));
+
+  doc.getElementById('pay-amount').value = '1600';
+  cli.onPayAmountChanged();
+  const lead = doc.getElementById('pay-surplus-lead');
+  check('typing more than the balance asks which it is',
+    doc.getElementById('pay-surplus').hidden === false &&
+    /\$200\.00/.test(lead.innerHTML) && /\$1,400\.00 outstanding/.test(lead.innerHTML),
+    lead.innerHTML);
+
+  function lastPayment() {
+    for (let i = calls.length - 1; i >= 0; i--) {
+      if (calls[i].name === 'payBudgetCategoriesFromClient') return String(calls[i].args).split('|');
+    }
+    return null;
+  }
+
+  await drive('record it as an overpayment', function() { cli.submitPayment(); });
+  check('overpayment is the default and is what gets sent',
+    lastPayment() && lastPayment()[5] === 'overpay', JSON.stringify(lastPayment()));
+
+  cli.openPayPanel('pay-host-obligations', 'biz_tax', 'Tax to pay', 'pay', 1400);
+  doc.getElementById('pay-amount').value = '1600';
+  doc.getElementById('pay-kind-correct').checked = true;
+  await drive('record it as a correction', function() { cli.submitPayment(); });
+  check('choosing correction sends that instead',
+    lastPayment() && lastPayment()[5] === 'correct', JSON.stringify(lastPayment()));
+
+  cli.openPayPanel('pay-host-obligations', 'biz_tax', 'Tax to pay', 'pay', 1400);
+  doc.getElementById('pay-amount').value = '400';
+  doc.getElementById('pay-note').value = 'ASB 4471 | prov tax';
+  await drive('an ordinary payment still asks nothing', function() { cli.submitPayment(); });
+  check('and keeps the server guard in place',
+    lastPayment() && lastPayment()[5] === 'refuse', JSON.stringify(lastPayment()));
+  // The mode went in before the note, so the note must still be everything
+  // after it — pipes and all.
+  check('the note still survives the delimiter, now that a field sits before it',
+    lastPayment() && lastPayment().slice(6).join('|') === 'ASB 4471 | prov tax',
+    JSON.stringify(lastPayment()));
+
   cli.closePayPanel();
+
+  console.log('\nOne range, shared across the reporting screens');
+  cli.setReportRange('2026-02-01', '2026-02-28');
+  await drive('dashboard keeps it', function() { cli.renderDashboardPage(container); });
+  check('the dashboard did not reset it to its own preset',
+    cli.AppState.dateFrom === '2026-02-01' && cli.AppState.dateTo === '2026-02-28',
+    cli.AppState.dateFrom + ' .. ' + cli.AppState.dateTo);
+
+  await drive('invoices keep it', function() { cli.showInvoiceTab('list'); });
+  check('invoices did not reset it either',
+    cli.AppState.dateFrom === '2026-02-01' && cli.AppState.dateTo === '2026-02-28',
+    cli.AppState.dateFrom + ' .. ' + cli.AppState.dateTo);
+
+  await drive('money flow keeps it', function() { cli.showBudgetTab('summary'); });
+  check('and money flow uses it to bound a payment',
+    cli.BudgetRange.from === '2026-02-01' && cli.BudgetRange.to === '2026-02-28',
+    JSON.stringify(cli.BudgetRange));
+
+  await drive('business expenses keep it', function() { cli.showBudgetTab('expenses'); });
+  check('the expenses tab shares it too',
+    cli.ExpenseRange.from === '2026-02-01' && cli.ExpenseRange.to === '2026-02-28',
+    JSON.stringify(cli.ExpenseRange));
+
+  const beforeAllocate = calls.length;
+  await drive('allocate tab', function() { cli.showBudgetTab('allocate'); });
+  check('the allocate tab asks for every invoice, with no window at all', (function() {
+    const call = calls.slice(beforeAllocate)
+      .find(function(c) { return c.name === 'getInvoicesWithDetails'; });
+    if (!call) return false;
+    const a = call.args || {};
+    return !a.dateFrom && !a.dateTo;
+  })());
+
+  console.log('\nThe allocation nudge');
+  check('it says how many are waiting, and what they are worth',
+    (function() {
+      const html = cli.dashPendingAllocation({ count: 3, value: 12450.5, oldest: '2026-02-28' });
+      return html.indexOf('3 paid invoices waiting') !== -1 &&
+        html.indexOf('$12,450.50') !== -1 && html.indexOf('href="#budget"') !== -1;
+    })());
+  check('one invoice reads as one, not "1 invoices"',
+    cli.dashPendingAllocation({ count: 1, value: 100, oldest: '' }).indexOf('1 paid invoice waiting') !== -1);
+  check('nothing waiting renders nothing at all',
+    cli.dashPendingAllocation({ count: 0, value: 0, oldest: '' }) === '' &&
+    cli.dashPendingAllocation(null) === '');
+
+  console.log('\nBusiness expenses');
+  await drive('record one', function() {
+    cli.showBudgetTab('expenses');
+    doc.getElementById('be-date').value = '2026-05-10';
+    doc.getElementById('be-amount').value = '240.50';
+    doc.getElementById('be-pot').value = 'biz_reserve';
+    doc.getElementById('be-description').value = 'Laptop';
+    doc.getElementById('be-category').value = 'Hardware';
+    cli.submitBusinessExpense({ preventDefault: function() {} });
+  });
+  check('it is sent as an object, not a pipe string', (function() {
+    for (let i = calls.length - 1; i >= 0; i--) {
+      if (calls[i].name === 'addBusinessExpense') {
+        const a = calls[i].args;
+        return a && a.description === 'Laptop' && a.paid_from === 'biz_reserve' &&
+          a.amount === '240.50';
+      }
+    }
+    return false;
+  })());
+  await drive('edit one', function() { cli.editBusinessExpense('BE-001'); });
+  check('editing loads the row into the form', !!cli.BusinessExpenseEdit &&
+    cli.BusinessExpenseEdit.description === 'Xero subscription');
+  await drive('save the edit', function() {
+    cli.submitBusinessExpense({ preventDefault: function() {} });
+  });
+  await drive('cancel an edit', function() { cli.cancelBusinessExpenseEdit(); });
+  await drive('delete one', function() { cli.deleteBusinessExpenseRow('BE-001'); });
+  // Money Flow decides where a payment goes from BudgetRange, so the expenses
+  // tab must not be able to move it.
+  cli.showBudgetTab('summary');
+  const moneyFlowRange = JSON.stringify(cli.BudgetRange);
+
+  doc.getElementById('be-filter-from').value = '2026-03-01';
+  doc.getElementById('be-filter-to').value = '2026-03-31';
+  await drive('filter the expenses tab', function() { cli.renderBusinessExpenses(); });
+
+  check('the expenses filter drives its own range',
+    cli.ExpenseRange.from === '2026-03-01' && cli.ExpenseRange.to === '2026-03-31',
+    JSON.stringify(cli.ExpenseRange));
+  check('and leaves the range a payment would be applied to alone',
+    JSON.stringify(cli.BudgetRange) === moneyFlowRange,
+    moneyFlowRange + ' became ' + JSON.stringify(cli.BudgetRange));
+  check('the expenses view is fetched for its own range', (function() {
+    for (let i = calls.length - 1; i >= 0; i--) {
+      if (calls[i].name === 'getBusinessExpenseView') {
+        return calls[i].args.dateFrom === '2026-03-01' && calls[i].args.dateTo === '2026-03-31';
+      }
+    }
+    return false;
+  })());
+
+  check('a healthy pot says what is left to spend',
+    cli.renderPotBalances([{ key: 'biz_reserve', label: 'Reserve', allocated: 500,
+      paidIn: 400, stillToMoveIn: 100, spent: 120, balance: 280 }]).indexOf('left to spend') !== -1);
+  const overdrawn = cli.renderPotBalances([{ key: 'biz_reserve', label: 'Reserve', allocated: 500,
+    paidIn: 400, stillToMoveIn: 0, spent: 700, balance: -300 }]);
+  check('an overdrawn pot says that, without a negative headline',
+    /mini-tile__value">\$300\.00/.test(overdrawn) && overdrawn.indexOf('overdrawn') !== -1 &&
+    overdrawn.indexOf('-$') === -1, overdrawn.slice(0, 260));
 
   doc.getElementById('inv-business').value = 'BIZ-001';
   doc.getElementById('inv-from').value = '2026-05-01';

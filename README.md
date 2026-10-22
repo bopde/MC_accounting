@@ -33,7 +33,7 @@ A finance management web app built entirely on Google Apps Script with Google Sh
 - Generate invoices from uninvoiced time entries and expenses for a business and date range.
 - Optional GST at a configurable rate (default 15%). Record tax already withheld by the payer.
 - Optional **PO number**, defaulting from the selected contract but editable, and settable on an existing invoice via Edit.
-- Print-friendly invoice view with your details ("From"), client details ("Bill To"), itemised services grouped by work code, and expenses listed individually. Only the **GST number** is printed — the IRD number is kept in Settings for reference but stays off documents that go to clients.
+- Print-friendly invoice view with your details ("From"), client details ("Bill To"), itemised services grouped by work code, and expenses listed individually. **Services and expenses are always totalled separately** — expenses are recovered at cost and are not income, so no combined figure is shown without its two parts above it. Only the **GST number** is printed — the IRD number is kept in Settings for reference but stays off documents that go to clients.
 - Status flow: draft -> sent -> paid -> void.
 - Entries are marked with the invoice ID once invoiced, preventing double-billing.
 
@@ -176,7 +176,7 @@ This is the **only external network request** made by the client. It loads the P
 
 ## Google Sheets Structure
 
-The spreadsheet has **12 tabs**, created automatically by `setupSheets()`:
+The spreadsheet has **13 tabs**, created automatically by `setupSheets()`:
 
 | Tab | Purpose | Key Fields |
 |-----|---------|-----------|
@@ -187,9 +187,10 @@ The spreadsheet has **12 tabs**, created automatically by `setupSheets()`:
 | **BudgetRules** | Budget percentage templates | rule_id, name, model, legacy `tax_withheld_pct`…`spend_pct`, company `biz_*_pct` / `per_*_pct`, is_default, notes, active |
 | **Contracts** | Client contracts / purchase orders | contract_id, business_id, name, po_number, date_from, date_to, value, currency, work_codes, status, notes |
 | **TimeEntries** | Logged work hours | entry_id, business_id, date, time_start, time_end, hours, description, work_code, rate, line_total, invoice_id, contract_id |
-| **Expenses** | Reimbursable expenses | expense_id, business_id, date, amount, description, work_code, invoice_id |
+| **Expenses** | Client-rebillable expenses | expense_id, business_id, date, amount, description, work_code, invoice_id |
+| **BusinessExpenses** | Company operating costs, spent from a pot | expense_id, date, description, category, amount, paid_from, notes, created_date |
 | **Invoices** | Generated invoices | invoice_id, business_id, date_from, date_to, created_date, include_gst, gst_rate, time_subtotal, subtotal, gst_amount, total, status, budget_rule_id, contract_id, po_number, description, notes, line_descriptions |
-| **BudgetAllocations** | Per-invoice budget splits | allocation_id, invoice_id, category, category_key, scope, percentage, amount, status, paid_amount, transfer_date, notes |
+| **BudgetAllocations** | Per-invoice budget splits | allocation_id, invoice_id, category, category_key, scope, percentage, amount, status, paid_amount, entry_type, transfer_date, notes |
 | **BudgetPayments** | Money actually moved, per payment | payment_id, payment_date, category_key, category, scope, amount, notes, covered, created_date |
 | **AccountSummaries** | Monthly account snapshots | summary_id, account_id, month, ending_balance, realised_gains, unrealised_gains, tax_paid, total_in, total_out, notes |
 
@@ -199,6 +200,8 @@ The spreadsheet has **12 tabs**, created automatically by `setupSheets()`:
 
 `BudgetPayments.covered` records exactly which allocations a payment was applied to and how much each got, as `BA-002:252;BA-003:18`, so a payment can be undone precisely rather than by re-deriving it.
 
+`entry_type` separates the cascade's own lines from the two kinds of row a payment can add when it comes to more than was outstanding — blank for a cascade line, `adjustment` for a correction, `credit` for an overpayment. Keeping them apart is what lets an invoice's own lines go on summing to exactly what it billed, however much is later paid against it.
+
 ### Migrations
 
 Schema changes only take effect when `setupSheets()` runs. Until then, any write touching a new column loses that value — so the app makes this hard to miss:
@@ -207,9 +210,26 @@ Schema changes only take effect when `setupSheets()` runs. Until then, any write
 1. **Load-time banner**: `bootstrap()` returns `schemaWarnings` from `checkSchema()`, and the app shows a banner naming the sheets and columns that are missing.
 1. **Loud writes**: `assertKnownColumns` throws rather than dropping a field with no column.
 
+#### One shared date range
+
+Dashboard, Invoices, Money Flow and Business Expenses share a single range, set once per session. Each page used to reset it to its own preset on render, so a range chosen on the Dashboard silently became three months on Invoices and six on Budget.
+
+Two deliberate exceptions:
+
+1. a. **Hours** keeps its own short default (today and yesterday). It is the data-entry screen, not a reporting one, and a six-month list is the wrong thing to type into.
+1. b. **Allocate Invoice** has no date window at all. A paid invoice with no budget behind it is a to-do, not a period figure — the same reason the Dashboard's waiting count ignores the filter. A window here could hide an invoice from this tab while the Dashboard went on saying it was waiting.
+
+A screen that needs the exact range it was *rendered* with still snapshots it: Money Flow bounds a payment by `BudgetRange`, which is a render-time copy, not a live reading of the preference.
+
 `setupSheets()` is idempotent: create missing sheets, append missing columns (`migrateColumns`), repair allocation identity columns (`migrateBudgetAllocations`), backfill `paid_amount` (`migrateAllocationPaidAmounts`), and seed a company rule if none exists.
 
 `migrateAllocationPaidAmounts` fills only blank cells, from the status that was already there — a `paid` row was paid in full, an `allocated` row was not paid at all. A partial payment recorded since is never overwritten.
+
+#### The sole-trader cascade is frozen
+
+It reads, it no longer writes. Historical allocations render exactly as they did, but a **new** allocation cannot use a pre-company rule: those rules are not offered on the Allocate tab, and both `previewAllocation` and `allocateBudget` refuse them.
+
+The set of pre-company invoices can never grow by one row, and keeping the write path open kept a second cascade alive in every grouping — a `legacy_` twin for each bucket — to serve data that is finished. The maths itself is untouched and still tested, so the rows it produced go on reconciling.
 
 `migrateBudgetAllocations` classifies **per invoice**, not per row. Six category labels — `Donate`, `Save`, `Invest`, `Spend`, `Tax Withheld`, `ACC Withheld` — are identical in both models, so a single row is ambiguous. A whole invoice is not: only a company allocation can contain `GST`, `Business Tax`, `Business ACC`, `Reserve`, `Owner Pay`, `Personal Tax` or `Personal ACC`. If any row in an invoice's set carries one of those, every row in that set is company. Amounts, labels and statuses are never rewritten — only the two identity columns are filled.
 
@@ -289,7 +309,7 @@ clasp open
 
 Then in the Apps Script editor:
 
-1. In the editor, run the `setupSheets` function (select it from the function dropdown and click Run). This creates all 12 tabs with headers, appends any missing columns, repairs allocation identity columns, backfills `paid_amount`, and seeds a company budget rule if none exists. Safe to re-run — it is idempotent. **After the first run you can do this from the spreadsheet instead: Finance Tracker → Run setup / migrations.** Re-run it after every code update that changes the schema; the app shows a banner when columns are missing.
+1. In the editor, run the `setupSheets` function (select it from the function dropdown and click Run). This creates all 13 tabs with headers, appends any missing columns, repairs allocation identity columns, backfills `paid_amount`, and seeds a company budget rule if none exists. Safe to re-run — it is idempotent. **After the first run you can do this from the spreadsheet instead: Finance Tracker → Run setup / migrations.** Re-run it after every code update that changes the schema; the app shows a banner when columns are missing.
 2. Go to **Deploy > New deployment**
 3. Select type: **Web app**
 4. Set "Execute as": **Me**
@@ -448,6 +468,35 @@ The same figures, condensed to three groups: **Total revenue** (business and per
 Time tagged with a contract belongs to that contract. Untagged time is attributed to the client's contract whose period covers its date — **but only when exactly one does**. Where two contracts for the same client overlap, nothing in the data says which one the work was for, so it is counted against neither and reported under the Contract Progress tile instead. Set the contract on those entries under **Hours** to bring them in.
 
 The rule lives in one place (`attributeTimeToContracts` in `ContractService.gs`); the Dashboard and the Contracts tab both call it, so they cannot report different spend for the same contract.
+
+### Business expenses
+
+**Budget → Business Expenses** records what the company spends on itself — software, hardware, accounting fees — and draws it out of the pot that paid for it.
+
+This is a different thing from **Hours → Client expenses**, and the two never meet. Each screen says so and points at the other, because the word "expenses" on its own does not distinguish them:
+
+| | Hours → Client expenses | Budget → Business Expenses |
+|---|---|---|
+| Billed to | a client, on an invoice | nobody |
+| In the cascade | excluded — a pass-through | excluded — spent after allocation |
+| Needs a client | yes | no |
+| Shows up as | a line on the invoice | a draw-down on a pot |
+
+A pot behaves unlike the other buckets. Tax and GST are *owed out* — allocate, pay, done. A pot is a **fund**: allocations fill it, spending draws it down, and the figure that matters is the balance.
+
+```
+paid in (allocations you have actually moved) − spent out = balance
+```
+
+**Paid in**, not allocated: an allocation you have not acted on yet is not money sitting there to spend. The tab shows both, so `$X more allocated but not yet moved in` is visible when the two differ. A pot can go overdrawn — the balance just goes negative and says so, rather than refusing a cost you really did incur.
+
+`paid_from` is a budget category key, and the pots offered are those whose settle mode is `hold` — money you keep somewhere. Spending from a tax bucket is refused: that money belongs to the IRD. Today the only business pot is Reserve.
+
+Expenses are filtered on their **own date**, not an invoice's, because there is no invoice behind them. Spending touches neither `BudgetAllocations` nor `BudgetPayments`, so every identity the cascade satisfies is untouched by it — what was *assigned* to a pot and what is *left* in it are two different questions.
+
+Business expenses do **not** currently reduce the Business Tax provision, which is still a percentage of business income. See the note under Budget Allocations.
+
+The **Dashboard** carries a `Business reserve` group showing the same ledger: the balance (moved in less spent), and how much is allocated but not yet in the account. It is omitted entirely when there is no reserve to report.
 
 ### Account Monitoring
 

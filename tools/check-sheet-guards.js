@@ -22,8 +22,9 @@ const path = require('path');
 const vm = require('vm');
 
 const ROOT = path.resolve(__dirname, '..');
-const FILES = ['BudgetCategories.gs', 'BudgetService.gs', 'SheetService.gs', 'Setup.gs',
-  'IdService.gs', 'InvoiceService.gs', 'SettingsService.gs', 'ClientWrappers.gs'];
+const FILES = ['BudgetCategories.gs', 'BudgetService.gs', 'BusinessExpenseService.gs',
+  'SheetService.gs', 'Setup.gs', 'IdService.gs', 'InvoiceService.gs', 'SettingsService.gs',
+  'ClientWrappers.gs'];
 
 const source = FILES
   .map(function(f) { return fs.readFileSync(path.join(ROOT, 'src', 'server', f), 'utf8'); })
@@ -556,6 +557,25 @@ check('every sheet in the schema can generate an id', function() {
     return exempt.indexOf(name) === -1 && !app.ID_PREFIXES[name];
   });
   eq(missing.join(','), '', 'sheets with no ID prefix');
+});
+
+check('allocations are declared with the column that separates the row kinds', function() {
+  eq(app.sheetSchemas().BudgetAllocations.indexOf('entry_type') !== -1, true, 'entry_type declared');
+});
+
+check('a surplus row written against an un-migrated sheet throws rather than vanishing', function() {
+  app.__ss = makeSpreadsheet({
+    BudgetAllocations: makeSheet('BudgetAllocations', ALLOC_HEADERS, [])
+  });
+  // Without entry_type the row would be written as an ordinary allocation,
+  // and a credit indistinguishable from money genuinely owed.
+  throws(function() {
+    app.appendRow('BudgetAllocations', {
+      invoice_id: '0526', category: 'Business ACC', category_key: 'biz_acc',
+      scope: 'business', percentage: '', amount: 0, status: 'paid',
+      paid_amount: 30, entry_type: 'credit', transfer_date: '2026-06-01', notes: ''
+    });
+  }, 'entry_type');
 });
 
 check('payments are declared with the columns the service writes', function() {
