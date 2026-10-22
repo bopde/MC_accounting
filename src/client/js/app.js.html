@@ -86,6 +86,7 @@ var App = {
       container.addEventListener('animationend', function() {
         container.classList.remove('page-entering');
       }, { once: true });
+      refreshTabOverflow();
     }
   },
 

@@ -98,7 +98,9 @@
   body > nav ul::-webkit-scrollbar { display: none !important; width: 0 !important; height: 0 !important; }
   body > nav ul {
     flex-wrap: wrap !important;
-    gap: 0 !important;
+    /* Not 0: the links' own padding boxes abut, and at phone sizes the words
+       ran into each other with no space between them at all. */
+    gap: 0.5rem !important;
     margin: 0 !important;
     padding: 0 !important;
     list-style: none !important;
@@ -138,13 +140,20 @@
   /* ---- Tabs ---- */
   .tab-bar {
     display: flex;
-    flex-wrap: wrap;
+    /* Scrolls rather than wrapping: three tabs wrapped to a second line on a
+       phone and the third was still clipped by the container's edge. */
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
     gap: 0.35rem;
     margin-bottom: 1.25rem;
     padding-bottom: 0.5rem;
     border-bottom: 1px solid var(--rule);
   }
+  .tab-bar::-webkit-scrollbar { display: none; }
   .tab-bar button {
+    flex: 0 0 auto;
     background: var(--white);
     border: 1px solid var(--rule);
     padding: 0.5rem 0.85rem;
@@ -320,6 +329,23 @@
     cursor: pointer;
   }
   label { font-size: 0.82rem; font-weight: 500; color: var(--ocean); }
+
+  /* Form fields own their own layout rather than inheriting whatever the base
+     stylesheet happens to give them. A label that wraps its input has to put
+     the caption ABOVE a full-width control; left to chance the two sit side by
+     side at ragged offsets, which on a phone reads as overlapping fields. */
+  form label { display: block; margin-bottom: 0.6rem; }
+  form label > input:not([type="checkbox"]):not([type="radio"]),
+  form label > select,
+  form label > textarea {
+    display: block;
+    width: 100%;
+    margin-top: 0.2rem;
+    margin-bottom: 0;
+  }
+  /* A checkbox stays beside its caption — "Include GST" is one line, not two */
+  form label > input[type="checkbox"],
+  form label > input[type="radio"] { display: inline-block; width: auto; margin-right: 0.35rem; }
 
   /* ---- Filters ---- */
   .filters {
@@ -900,6 +926,21 @@
     gap: 0.25rem;
     flex-wrap: wrap;
   }
+  /* Only rendered at phone width, where .col-secondary is dropped. */
+  .row-sub { display: none; }
+
+  /* The one line that says whether the headline total is settled. Loud when
+     there is something left to do, quiet when there is not — so a page of
+     boxes can be read by colour before it is read by number. */
+  .dash-budget-item__status {
+    font-size: 0.74rem;
+    font-weight: 500;
+    margin-top: 0.1rem;
+  }
+  .dash-budget-item__status--open   { color: var(--tide); }
+  .dash-budget-item__status--done   { color: var(--success); }
+  .dash-budget-item__status--credit { color: var(--warn); }
+  .dash-budget-item__status--quiet  { color: var(--muted); font-weight: 400; }
 
   /* ---- Print ---- */
   @page { margin: 1.5cm 1.5cm 1cm; }
@@ -949,12 +990,31 @@
     .pot-grid { grid-template-columns: 1fr; }
     .dash-columns { grid-template-columns: 1fr; }
     .dash-budget-grid { grid-template-columns: 1fr; }
+    /* Columns a table can afford to lose on a phone, so the ones that matter
+       stay on screen. What they held is repeated under the description. */
+    .data-table .col-secondary { display: none; }
+    .row-sub { display: block; font-size: 0.7rem; color: var(--muted); margin-top: 0.15rem; }
+    /* Row actions stack rather than run off the right edge, where the second
+       one was unreachable without scrolling the table sideways. */
+    td.actions { white-space: normal; }
+    td.actions .btn-small { display: block; width: 100% !important; margin: 0 0 0.25rem; }
+    td.actions .btn-small:last-child { margin-bottom: 0; }
     table { font-size: 0.8rem; }
     table td, table th { padding: 0.4rem 0.45rem; }
     .toast { left: 0.75rem; right: 0.75rem; }
-    .tab-bar { gap: 0.3rem; overflow-x: auto; -webkit-overflow-scrolling: touch; flex-wrap: nowrap; padding-bottom: 0.4rem; scrollbar-width: none; -ms-overflow-style: none; }
-    .tab-bar::-webkit-scrollbar { display: none; }
-    .tab-bar button { flex-shrink: 0; min-height: 40px; }
+    .tab-bar { gap: 0.3rem; padding-bottom: 0.4rem; -ms-overflow-style: none; }
+    /* Tighter tracking and padding, so three tabs fit a phone without being
+       shrunk to unreadable. If a fourth is ever added the bar still scrolls —
+       the fade below is what says so, since the scrollbar is hidden. */
+    .tab-bar button {
+      min-height: 40px;
+      padding: 0.5rem 0.55rem;
+      letter-spacing: 0.04em;
+    }
+    .tab-bar--overflowing {
+      -webkit-mask-image: linear-gradient(to right, #000 85%, transparent 100%);
+      mask-image: linear-gradient(to right, #000 85%, transparent 100%);
+    }
     .preview-numbers { gap: 0.75rem; }
     .category-block { padding: 0.75rem; }
     .category-block__header { gap: 0.3rem; }

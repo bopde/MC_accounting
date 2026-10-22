@@ -3,6 +3,10 @@
  * Bundles all dashboard data into a single RPC to avoid multiple round-trips.
  */
 function getDashboardData(params) {
+  return withSheetCache(function() { return buildDashboardData(params); });
+}
+
+function buildDashboardData(params) {
   params = params || {};
   var dateFrom = params.dateFrom || '';
   var dateTo = params.dateTo || '';

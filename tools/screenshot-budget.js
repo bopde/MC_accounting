@@ -128,6 +128,9 @@ let expenseSeq = 0;
 Object.assign(srv, {
   LockService: { getScriptLock: function() { return { waitLock: function() {}, releaseLock: function() {} }; } },
   withScriptLock: function(fn) { return fn(); },
+  // Pass-through: the real one memoises sheet reads, which these fixtures do
+  // not have. Its own behaviour is covered in check-sheet-guards.js.
+  withSheetCache: function(fn) { return fn(); },
   getAll: function(n) { return (db[n] || []).map(function(r) { return Object.assign({}, r); }); },
   findById: function(n, id) {
     const rows = db[n] || [];
@@ -245,7 +248,8 @@ const cli = {
 };
 cli.serverCall = function() { return Promise.resolve(null); };
 vm.createContext(cli);
-vm.runInContext([inlineScript('utils.js.html'), inlineScript('budget.js.html')].join('\n'),
+vm.runInContext([inlineScript('utils.js.html'), inlineScript('budget.js.html'),
+  inlineScript('dashboard.js.html')].join('\n'),
   cli, { filename: 'budget-client.js' });
 cli.AppCache.budgetCategories = srv.getBudgetCategories();
 cli.BudgetRange = { from: RANGE.dateFrom, to: RANGE.dateTo };
@@ -293,6 +297,20 @@ const withSurplus = overview.replace(
   '<div class="pay-host" id="pay-host-obligations"></div>',
   '<div class="pay-host" id="pay-host-obligations">' + surplusPanel + '</div>');
 
+// The Dashboard's Budget card, off the same book as the Budget page — so a box
+// that disagrees with its tab is visible side by side in the shots.
+const dashData = srv.allCategoryDefs().map(function(def) {
+  const cat = cats[def.key];
+  return {
+    category: def.label, key: def.key, scope: def.scope, group: def.group,
+    settle: def.settle, isTransfer: !!def.isTransfer,
+    allocated: cat ? cat.allocated : 0,
+    paid: cat ? cat.paid : 0,
+    outstanding: cat ? cat.outstanding : 0
+  };
+}).filter(function(c) { return c.allocated > 0; });
+const dashCard = cli.dashBudget(dashData, summary.potSpending || {});
+
 // The Business Expenses tab, from the real server view and the real renderers.
 const expenseView = srv.getBusinessExpenseView(RANGE);
 const expensesTab =
@@ -334,9 +352,10 @@ const appStyles = fs.readFileSync(path.join(ROOT, 'src/client/css/styles.css.htm
 
 function page(body, opts) {
   opts = opts || {};
+  var active = opts.nav || 'Budget';
   return '<!DOCTYPE html>\n<html lang="en" data-theme="light"><head><meta charset="UTF-8">' +
     '<meta name="viewport" content="width=device-width, initial-scale=1.0">' +
-    '<title>Finance Tracker — Money Flow</title>' +
+    '<title>Finance Tracker — ' + active + '</title>' +
     (pico ? '<link rel="stylesheet" href="file://' + pico + '">' : '') +
     (fonts ? '<style>' + fonts + '</style>' : '') +
     appStyles +
@@ -351,21 +370,27 @@ function page(body, opts) {
       '<ul><li><strong>Finance Tracker</strong></li></ul>' +
       '<ul>' +
         ['Dashboard', 'Hours', 'Invoices', 'Budget', 'Settings'].map(function(p) {
-          return '<li><a href="#" class="nav-link' + (p === 'Budget' ? ' active' : '') + '">' + p + '</a></li>';
+          return '<li><a href="#" class="nav-link' + (p === active ? ' active' : '') + '">' + p + '</a></li>';
         }).join('') +
       '</ul>' +
     '</nav>' +
     '<main class="container">' +
       '<div id="app-content">' +
-        '<div class="tab-bar" id="budget-tabs">' +
-          ['Money Flow', 'Allocate Invoice', 'Business Expenses'].map(function(t) {
-            return '<button type="button"' +
-              (t === (opts.tab || 'Money Flow') ? ' class="active"' : '') + '>' + t + '</button>';
-          }).join('') +
-        '</div>' +
+        (opts.tabs === false ? '' :
+          '<div class="tab-bar" id="budget-tabs">' +
+            ['Money Flow', 'Allocate Invoice', 'Business Expenses'].map(function(t) {
+              return '<button type="button"' +
+                (t === (opts.tab || 'Money Flow') ? ' class="active"' : '') + '>' + t + '</button>';
+            }).join('') +
+          '</div>') +
         '<div id="budget-tab-content">' + (opts.filters === false ? '' : filters) + body + '</div>' +
       '</div>' +
     '</main>' +
+    // Mirrors refreshTabOverflow() in utils.js.html, which app.js calls after a
+    // page renders. There is no app.js here, and without it a bar that scrolls
+    // is photographed without the cue that says so.
+    '<script>document.querySelectorAll(".tab-bar").forEach(function(b){' +
+      'b.classList.toggle("tab-bar--overflowing", b.scrollWidth - b.clientWidth > 1);});</scr' + 'ipt>' +
     '</body></html>';
 }
 
@@ -386,13 +411,24 @@ const SHOTS = [
   { file: 'business-expenses.png', width: 1280,
     html: page(expensesTab, { filters: false, tab: 'Business Expenses' }),
     caption: 'Business Expenses: the pot balance, the form, and what has been spent.' },
+  { file: 'business-expenses-mobile.png', width: 390,
+    html: page(expensesTab, { filters: false, tab: 'Business Expenses' }),
+    caption: 'The same tab on a phone.' },
   { file: 'money-flow-history.png', width: 1280, scale: 1,
     html: page(history.replace('<details class="flow-group history-group">',
       '<details class="flow-group history-group" open>'), { filters: false }),
     caption: 'History expanded: every payment, then every allocation per invoice.' },
   { file: 'money-flow-mobile.png', width: 420,
     html: page(overview + history),
-    caption: 'The same page on a phone.' }
+    caption: 'The same page on a phone.' },
+  { file: 'dashboard-budget.png', width: 1280,
+    html: page('<div class="dash-grid">' + dashCard + '</div>',
+      { filters: false, tabs: false, nav: 'Dashboard' }),
+    caption: 'The Dashboard budget card: every box headlines a total.' },
+  { file: 'dashboard-budget-mobile.png', width: 390,
+    html: page('<div class="dash-grid">' + dashCard + '</div>',
+      { filters: false, tabs: false, nav: 'Dashboard' }),
+    caption: 'The same card on a phone.' }
 ];
 
 (async function run() {

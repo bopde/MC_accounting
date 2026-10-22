@@ -494,6 +494,40 @@ function setReportRange(from, to) {
   return reportRange();
 }
 
+/**
+ * Put content into a panel and stop it claiming to be busy.
+ *
+ * `aria-busy` on a container is what draws Pico's spinner. Replacing only the
+ * container's innerHTML leaves the attribute behind, so the spinner went on
+ * turning over data that had already arrived — which reads as a page that
+ * never finishes loading rather than one that finished a second ago.
+ */
+function fillPanel(el, html) {
+  if (!el) return null;
+  el.innerHTML = html;
+  if (el.removeAttribute) el.removeAttribute('aria-busy');
+  return el;
+}
+
+/**
+ * Mark a tab bar that is wider than the space it has.
+ *
+ * The scrollbar is hidden — one showing under three tabs reads as a rendering
+ * fault — so without a cue a clipped tab looks like broken layout rather than
+ * something to scroll to. The class fades its right edge instead.
+ */
+function refreshTabOverflow() {
+  var bars = document.querySelectorAll('.tab-bar');
+  for (var i = 0; i < bars.length; i++) {
+    var bar = bars[i];
+    bar.classList.toggle('tab-bar--overflowing', bar.scrollWidth - bar.clientWidth > 1);
+  }
+}
+
+if (typeof window !== 'undefined' && window.addEventListener) {
+  window.addEventListener('resize', refreshTabOverflow);
+}
+
 function todayStr() {
   var d = new Date();
   var mo = String(d.getMonth() + 1).padStart(2, '0');

@@ -113,25 +113,25 @@ function renderBudgetSummary() {
 
     var scopes = (summary && summary.scopes) || [];
     if (!scopes.length) {
-      body.innerHTML =
+      fillPanel(body,
         '<article class="empty-state">' +
           '<h3>No allocations in this date range</h3>' +
           '<p>Mark an invoice as paid, then come here to allocate it.</p>' +
-        '</article>';
+        '</article>');
       return;
     }
 
     var cats = catByKey(summary);
-    body.innerHTML =
+    fillPanel(body,
       renderMoneyMap(summary, cats) +
       renderRevenueSection(summary, cats) +
       renderObligationsSection(cats) +
       renderIncomeSection(cats, summary) +
       renderAllocationsSection(cats) +
-      renderHistorySection(summary, cats);
+      renderHistorySection(summary, cats));
   }).catch(function(err) {
-    var body = document.getElementById('budget-summary-body');
-    if (body) body.innerHTML = '<p class="error">Error: ' + escapeHtml(err.message) + '</p>';
+    fillPanel(document.getElementById('budget-summary-body'),
+      '<p class="error">Error: ' + escapeHtml(err.message) + '</p>');
   });
 }
 
@@ -1022,14 +1022,13 @@ function renderBusinessExpenses() {
 
   serverCall('getBusinessExpenseView', { dateFrom: ExpenseRange.from, dateTo: ExpenseRange.to })
     .then(function(view) {
-      var body = document.getElementById('be-body');
-      if (!body) return;
-      body.innerHTML = renderPotBalances(view.pots) +
+      fillPanel(document.getElementById('be-body'),
+        renderPotBalances(view.pots) +
         renderBusinessExpenseForm(view) +
-        renderBusinessExpenseList(view.expenses);
+        renderBusinessExpenseList(view.expenses));
     }).catch(function(err) {
-      var body = document.getElementById('be-body');
-      if (body) body.innerHTML = '<p class="error">Error: ' + escapeHtml(err.message) + '</p>';
+      fillPanel(document.getElementById('be-body'),
+        '<p class="error">Error: ' + escapeHtml(err.message) + '</p>');
     });
 }
 
@@ -1134,18 +1133,26 @@ function renderBusinessExpenseList(expenses) {
     return html + '<p class="muted">Nothing recorded in this range yet.</p></section>';
   }
 
+  // Seven columns do not fit a phone, and the ones that fell off the edge were
+  // the amount and the buttons. Category, pot and note are marked secondary:
+  // dropped at phone width and repeated under the description instead, which
+  // leaves date, what it was, what it cost, and what you can do about it.
   html += '<div class="scroll-x"><table class="data-table data-table--compact">' +
-    '<thead><tr><th>Date</th><th>Description</th><th>Category</th>' +
-    '<th>From</th><th class="number">Amount</th><th>Note</th><th></th></tr></thead><tbody>';
+    '<thead><tr><th>Date</th><th>Description</th><th class="col-secondary">Category</th>' +
+    '<th class="col-secondary">From</th><th class="number">Amount</th>' +
+    '<th class="col-secondary">Note</th><th></th></tr></thead><tbody>';
 
   expenses.forEach(function(e) {
+    var sub = [e.category, e.paid_from_label, e.notes].filter(Boolean).join(' · ');
     html += '<tr>' +
       '<td>' + (e.date ? formatDate(e.date) : '<span class="muted">—</span>') + '</td>' +
-      '<td>' + escapeHtml(e.description) + '</td>' +
-      '<td>' + (e.category ? escapeHtml(e.category) : '<span class="muted">—</span>') + '</td>' +
-      '<td><span class="pot-tag pot-tag--business">' + escapeHtml(e.paid_from_label) + '</span></td>' +
+      '<td>' + escapeHtml(e.description) +
+        (sub ? '<span class="row-sub">' + escapeHtml(sub) + '</span>' : '') + '</td>' +
+      '<td class="col-secondary">' + (e.category ? escapeHtml(e.category) : '<span class="muted">—</span>') + '</td>' +
+      '<td class="col-secondary"><span class="pot-tag pot-tag--business">' +
+        escapeHtml(e.paid_from_label) + '</span></td>' +
       '<td class="number">' + formatCurrency(e.amount) + '</td>' +
-      '<td>' + (e.notes ? escapeHtml(e.notes) : '<span class="muted">—</span>') + '</td>' +
+      '<td class="col-secondary">' + (e.notes ? escapeHtml(e.notes) : '<span class="muted">—</span>') + '</td>' +
       '<td class="actions">' +
         '<button type="button" class="btn-small" onclick="editBusinessExpense(\'' +
           jsAttr(e.expense_id) + '\')">Edit</button> ' +
@@ -1214,51 +1221,28 @@ function renderBudgetAllocate() {
   var content = document.getElementById('budget-tab-content');
   content.innerHTML = '<div aria-busy="true">Loading invoices...</div>';
 
-  // No date window at all. A paid invoice with no budget behind it is a to-do,
-  // not a period figure — the same reason the Dashboard's count ignores the
-  // filter. A window here could hide one from this tab while the Dashboard
-  // went on saying three were waiting.
-  Promise.all([
-    serverCall('getInvoicesWithDetails', {}),
-    serverCall('getAllClient', 'BudgetAllocations'),
-    serverCall('getBudgetRules')
-  ]).then(function(results) {
-    var invoices = results[0] || [];
-    var existingAllocs = results[1] || [];
-    var rules = (results[2] || []).filter(function(r) {
-      return isFlagTrue(r.active) || r.active === '' || r.active === undefined || r.active === null;
-    });
-
-    // normalizeId on both sides: Sheets stores invoice_id '0526' on the
-    // allocation row as the number 526, so a raw key never matched and an
-    // allocated invoice stayed in this list forever.
-    var allocatedInvoiceIds = {};
-    existingAllocs.forEach(function(a) { allocatedInvoiceIds[normalizeId(a.invoice_id)] = true; });
-
-    var eligible = invoices.filter(function(inv) {
-      return inv.status === 'paid' && !allocatedInvoiceIds[normalizeId(inv.invoice_id)];
-    });
+  // One call. The matching of paid invoices against allocated ones is done on
+  // the server, where both sheets already are — see getBudgetAllocateView.
+  serverCall('getBudgetAllocateView', {}).then(function(data) {
+    var eligible = (data && data.invoices) || [];
+    var companyRules = (data && data.rules) || [];
+    var frozenCount = (data && data.frozenCount) || 0;
+    var ruleCount = (data && data.ruleCount) || 0;
 
     if (eligible.length === 0) {
-      content.innerHTML =
+      fillPanel(content,
         '<article class="empty-state">' +
           '<h3>Nothing to allocate</h3>' +
           '<p class="muted">Every paid invoice has been allocated. Mark a new invoice as paid ' +
             'in the Invoices tab to allocate it here.</p>' +
-        '</article>';
+        '</article>');
       return;
     }
 
-    // Pre-company rules are not offered at all. They are kept so historical
-    // allocations still read, but the cascade behind them is frozen, so an
-    // option that could only ever be refused is not an option.
-    var companyRules = rules.filter(function(r) { return ruleModelOf(r) === 'company'; });
-    var frozenCount = rules.length - companyRules.length;
-
     if (companyRules.length === 0) {
-      content.innerHTML =
+      fillPanel(content,
         '<article class="empty-state">' +
-          '<h3>' + (rules.length === 0 ? 'No budget rules yet' : 'No company budget rule') + '</h3>' +
+          '<h3>' + (ruleCount === 0 ? 'No budget rules yet' : 'No company budget rule') + '</h3>' +
           '<p class="muted">' + (frozenCount > 0
             ? 'The ' + frozenCount + ' rule' + (frozenCount === 1 ? '' : 's') +
               ' you have ' + (frozenCount === 1 ? 'is a' : 'are') + ' pre-company (sole trader) ' +
@@ -1266,7 +1250,7 @@ function renderBudgetAllocate() {
               'still read, but new allocations cannot use them. '
             : '') +
             'Add a company rule under Settings &rarr; Budget Rules.</p>' +
-        '</article>';
+        '</article>');
       return;
     }
 
@@ -1284,7 +1268,7 @@ function renderBudgetAllocate() {
       return { id: r.rule_id, label: r.name };
     });
 
-    content.innerHTML =
+    fillPanel(content,
       '<form id="allocate-form" class="form-card">' +
         '<div class="form-row">' +
           '<label>Invoice ' + buildSelect('ba-invoice', invoiceOptions, 'id', 'label', { required: true }) + '</label>' +
@@ -1294,9 +1278,9 @@ function renderBudgetAllocate() {
           '<button type="button" onclick="previewAllocation()">Preview allocation</button>' +
         '</div>' +
       '</form>' +
-      '<div id="allocation-preview"></div>';
+      '<div id="allocation-preview"></div>');
   }).catch(function(err) {
-    content.innerHTML = '<p class="error">Error: ' + escapeHtml(err.message) + '</p>';
+    fillPanel(content, '<p class="error">Error: ' + escapeHtml(err.message) + '</p>');
   });
 }
 
