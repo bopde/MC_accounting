@@ -479,6 +479,8 @@ Expenses are filtered on their **own date**, not an invoice's, because there is 
 
 Business expenses do **not** currently reduce the Business Tax provision, which is still a percentage of business income. See the note under Budget Allocations.
 
+The **Dashboard does not show the Reserve or what has been spent from it** — its budget tile is revenue, obligations and personal allocations, as specified. The pot balance lives on this tab alone.
+
 ### Account Monitoring
 
 1. Go to **Accounts > Monthly**

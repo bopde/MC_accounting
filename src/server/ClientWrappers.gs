@@ -37,19 +37,6 @@ function previewAllocationFromClient(params) {
 }
 
 /**
- * Update allocation status from client.
- * @param {string} params - "allocationId|newStatus|transferDate|notes"
- */
-function updateAllocationStatusFromClient(params) {
-  var parts = String(params).split('|');
-  if (parts.length < 2) throw new Error('Invalid parameters');
-  // The note is free text and may itself contain '|' (e.g. "ASB 4471 | GST Q2"),
-  // so it takes everything after the third delimiter rather than one field.
-  var notes = parts.length > 3 ? parts.slice(3).join('|') : '';
-  return updateAllocationStatus(parts[0], parts[1], parts[2] || null, notes || null);
-}
-
-/**
  * Record a payment against one or more budget categories.
  *
  * @param {string} params

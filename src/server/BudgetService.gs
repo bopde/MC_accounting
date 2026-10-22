@@ -250,6 +250,15 @@ function updateAllocationStatus(allocationId, newStatus, transferDate, notes) {
     var alloc = allocs.find(function(a) { return idsMatch(a.allocation_id, allocationId); });
     if (!alloc) throw new Error('Allocation not found: ' + allocationId);
 
+    // A credit owes nothing, so settling it "in full" would set its paid
+    // amount to zero and quietly erase the credit. A correction is settled by
+    // the payment that created it. Neither is a row to toggle by hand — undo
+    // the payment instead, which removes them properly.
+    if (!isCascadeLine(alloc)) {
+      throw new Error('That row is a ' + allocationEntryType(alloc) + ' created by a payment, ' +
+        'not an allocation to settle. Undo the payment under Budget > Money Flow > History.');
+    }
+
     alloc.status = newStatus;
     if (newStatus === 'paid') {
       alloc.paid_amount = Number(alloc.amount) || 0;

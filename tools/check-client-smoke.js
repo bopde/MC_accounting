@@ -538,6 +538,30 @@ async function drive(label, fn) {
   });
   await drive('cancel an edit', function() { cli.cancelBusinessExpenseEdit(); });
   await drive('delete one', function() { cli.deleteBusinessExpenseRow('BE-001'); });
+  // Money Flow decides where a payment goes from BudgetRange, so the expenses
+  // tab must not be able to move it.
+  cli.showBudgetTab('summary');
+  const moneyFlowRange = JSON.stringify(cli.BudgetRange);
+
+  doc.getElementById('be-filter-from').value = '2026-03-01';
+  doc.getElementById('be-filter-to').value = '2026-03-31';
+  await drive('filter the expenses tab', function() { cli.renderBusinessExpenses(); });
+
+  check('the expenses filter drives its own range',
+    cli.ExpenseRange.from === '2026-03-01' && cli.ExpenseRange.to === '2026-03-31',
+    JSON.stringify(cli.ExpenseRange));
+  check('and leaves the range a payment would be applied to alone',
+    JSON.stringify(cli.BudgetRange) === moneyFlowRange,
+    moneyFlowRange + ' became ' + JSON.stringify(cli.BudgetRange));
+  check('the expenses view is fetched for its own range', (function() {
+    for (let i = calls.length - 1; i >= 0; i--) {
+      if (calls[i].name === 'getBusinessExpenseView') {
+        return calls[i].args.dateFrom === '2026-03-01' && calls[i].args.dateTo === '2026-03-31';
+      }
+    }
+    return false;
+  })());
+
   check('a healthy pot says what is left to spend',
     cli.renderPotBalances([{ key: 'biz_reserve', label: 'Reserve', allocated: 500,
       paidIn: 400, stillToMoveIn: 100, spent: 120, balance: 280 }]).indexOf('left to spend') !== -1);

@@ -991,27 +991,37 @@ function sortInvoiceIds(a, b) {
  */
 var BusinessExpenseEdit = null;
 
+/**
+ * This tab's own date range.
+ *
+ * Not BudgetRange: that one belongs to Money Flow, and a payment recorded
+ * there is applied to exactly the range it names. Two screens writing to one
+ * variable is a trap even while it happens to work, because the one that
+ * reads it does so to decide where money goes.
+ */
+var ExpenseRange = { from: '', to: '' };
+
 function renderBusinessExpenses() {
   var content = document.getElementById('budget-tab-content');
 
   var existingFrom = document.getElementById('be-filter-from');
   var existingTo = document.getElementById('be-filter-to');
   if (existingFrom && existingTo) {
-    BudgetRange = { from: existingFrom.value, to: existingTo.value };
+    ExpenseRange = { from: existingFrom.value, to: existingTo.value };
   } else {
     var range = datePreset('ytd');
-    BudgetRange = { from: range.from, to: range.to };
+    ExpenseRange = { from: range.from, to: range.to };
   }
 
   content.innerHTML =
     '<div class="filters">' +
-      buildDateFilters('be-filter-from', 'be-filter-to', BudgetRange.from, BudgetRange.to) +
+      buildDateFilters('be-filter-from', 'be-filter-to', ExpenseRange.from, ExpenseRange.to) +
       '<button type="button" class="btn-subtle" onclick="renderBusinessExpenses()">Apply</button>' +
     '</div>' +
     '<p class="muted small" style="margin:-0.5rem 0 0.5rem;">Default: this year</p>' +
     '<div id="be-body" aria-busy="true">Loading...</div>';
 
-  serverCall('getBusinessExpenseView', { dateFrom: BudgetRange.from, dateTo: BudgetRange.to })
+  serverCall('getBusinessExpenseView', { dateFrom: ExpenseRange.from, dateTo: ExpenseRange.to })
     .then(function(view) {
       var body = document.getElementById('be-body');
       if (!body) return;
@@ -1169,7 +1179,7 @@ function submitBusinessExpense(event) {
 }
 
 function editBusinessExpense(expenseId) {
-  serverCall('getBusinessExpenseView', { dateFrom: BudgetRange.from, dateTo: BudgetRange.to })
+  serverCall('getBusinessExpenseView', { dateFrom: ExpenseRange.from, dateTo: ExpenseRange.to })
     .then(function(view) {
       var found = (view.expenses || []).find(function(e) {
         return idsMatch(e.expense_id, expenseId);

@@ -339,6 +339,29 @@ assert(r2(after.totals.paid) === r2(750 + 15.87),
   'paid total counts withheld money too, got ' + after.totals.paid);
 
 app.updateAllocationStatus(gstRow.allocation_id, 'allocated');
+
+// It is an escape hatch for a cascade line, not a way to poke at the rows a
+// payment creates — settling a credit "in full" would set its paid amount to
+// its zero owed and erase it.
+const creditPayment = app.payBudgetCategories('biz_acc',
+  bucket(app.getBudgetSummary(RANGE), 'biz_acc').outstanding + 25, '2026-06-30', '', RANGE, 'overpay');
+const creditRow = app.getAll('BudgetAllocations').find(function(a) {
+  return a.entry_type === 'credit';
+});
+assert(!!creditRow, 'the overpayment left a credit row to try it on');
+assert((function() {
+  let refused = '';
+  try { app.updateAllocationStatus(creditRow.allocation_id, 'paid'); } catch (e) { refused = e.message; }
+  return /created by a payment/.test(refused);
+})(), 'settling a credit row by hand is refused, and says to undo the payment instead');
+assert(r2(app.allocationPaidAmount(app.getAll('BudgetAllocations').find(function(a) {
+  return a.allocation_id === creditRow.allocation_id;
+}))) === 25, 'and the credit is untouched');
+
+// Put the book back: the sections below share this fixture.
+app.undoBudgetPayment(creditPayment.payment_id);
+assert(!app.getAll('BudgetAllocations').some(function(a) { return a.entry_type === 'credit'; }),
+  'the credit row is gone again');
 const undone = app.getBudgetSummary(RANGE);
 assert(r2(undone.accountHoldings.business) === businessExpected, 'undo restores business holdings');
 
